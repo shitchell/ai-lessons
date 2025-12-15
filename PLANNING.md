@@ -260,7 +260,7 @@ Not all knowledge is equal:
 
 #### Confidence Level
 
-**Values:** `low`, `medium`, `high` (no "verified")
+**Values:** `very-low`, `low`, `medium`, `high`, `very-high` (no "verified")
 
 **Rationale**: "Verified" sounds objective but isn't - someone can confidently "verify" a wrong conclusion. Confidence is always subjective, so the vocabulary should reflect that.
 
@@ -310,9 +310,14 @@ anti_contexts:
 -- Reference tables for enum-like fields
 CREATE TABLE confidence_levels (
     name TEXT PRIMARY KEY,
-    ordinal INTEGER  -- For sorting: low=1, medium=2, high=3
+    ordinal INTEGER  -- For sorting: 1-5
 );
-INSERT INTO confidence_levels VALUES ('low', 1), ('medium', 2), ('high', 3);
+INSERT INTO confidence_levels VALUES
+    ('very-low', 1),
+    ('low', 2),
+    ('medium', 3),
+    ('high', 4),
+    ('very-high', 5);
 
 CREATE TABLE source_types (
     name TEXT PRIMARY KEY,
@@ -331,7 +336,7 @@ CREATE TABLE lessons (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,                               -- Keyword searchable
     content TEXT NOT NULL,                             -- Semantic search
-    confidence TEXT REFERENCES confidence_levels(name),-- low | medium | high
+    confidence TEXT REFERENCES confidence_levels(name),-- very-low to very-high
     source TEXT REFERENCES source_types(name),         -- How we know this
     source_notes TEXT,                                 -- Optional elaboration
     created_at TIMESTAMP,
@@ -390,7 +395,7 @@ For enum-like fields (confidence, source), we use reference tables instead of CH
 -- Reference tables (data, not schema)
 CREATE TABLE confidence_levels (
     name TEXT PRIMARY KEY,
-    ordinal INTEGER  -- For sorting: low=1, medium=2, high=3
+    ordinal INTEGER  -- For sorting: 1-5
 );
 
 CREATE TABLE source_types (
