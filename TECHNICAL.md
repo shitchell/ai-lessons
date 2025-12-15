@@ -19,7 +19,7 @@ This document provides a technical overview of all system components, their rela
                               ▼
                ┌──────────────────────────────┐
                │        Core Library          │
-               │  (Python: aimem/core.py)     │
+               │  (Python: ai_lessons/core.py) │
                │  - CRUD operations           │
                │  - Search (hybrid)           │
                │  - Graph traversal           │
@@ -30,7 +30,7 @@ This document provides a technical overview of all system components, their rela
                               ▼
                ┌──────────────────────────────┐
                │      SQLite + sqlite-vec     │
-               │      (~/.ai/aimem/)          │
+               │      (~/.ai/lessons/)         │
                │  - knowledge.db              │
                │  - config.yaml               │
                └──────────────────────────────┘
@@ -44,7 +44,7 @@ This document provides a technical overview of all system components, their rela
 
 ### 2.1 Storage Layer (SQLite + sqlite-vec)
 
-**File:** `~/.ai/aimem/knowledge.db`
+**File:** `~/.ai/lessons/knowledge.db`
 
 #### Tables
 
@@ -83,7 +83,7 @@ CREATE INDEX idx_lessons_updated ON lessons(updated_at);
 
 #### Configuration
 
-**File:** `~/.ai/aimem/config.yaml`
+**File:** `~/.ai/lessons/config.yaml`
 
 ```yaml
 # Tag management
@@ -114,7 +114,7 @@ embedding:
 
 ### 2.2 Core Library
 
-**Module:** `aimem/core.py`
+**Module:** `ai_lessons/core.py`
 
 Provides all business logic, shared by MCP and CLI.
 
@@ -165,7 +165,7 @@ def _run_migrations() -> None
 
 ### 2.3 MCP Server
 
-**File:** `~/.ai/aimem/mcp-server/server.py`
+**File:** `~/.ai/lessons/mcp-server/server.py`
 
 Exposes core library as MCP tools for Claude Code and MCP-compatible agents.
 
@@ -199,7 +199,7 @@ Exposes core library as MCP tools for Claude Code and MCP-compatible agents.
 
 ### 2.4 CLI Tool
 
-**File:** `~/bin/ai-learn` (symlink to `~/.ai/aimem/cli/main.py`)
+**File:** `~/bin/ai-lessons` (symlink to `~/.ai/lessons/cli/main.py`)
 
 Same capabilities as MCP, optimized for terminal interaction.
 
@@ -207,30 +207,30 @@ Same capabilities as MCP, optimized for terminal interaction.
 
 ```bash
 # Learning
-ai-learn add --title "..." --content "..." --tags a,b,c [options]
-ai-learn add --interactive  # Guided prompts
+ai-lessons add --title "..." --content "..." --tags a,b,c [options]
+ai-lessons add --interactive  # Guided prompts
 
 # Searching
-ai-learn search "query" [--tags ...] [--context ...] [--limit N]
-ai-learn show <lesson_id>
+ai-lessons search "query" [--tags ...] [--context ...] [--limit N]
+ai-lessons show <lesson_id>
 
 # Graph
-ai-learn related <lesson_id> [--depth N]
-ai-learn link <from_id> <to_id> --relation "derived_from"
-ai-learn unlink <from_id> <to_id>
+ai-lessons related <lesson_id> [--depth N]
+ai-lessons link <from_id> <to_id> --relation "derived_from"
+ai-lessons unlink <from_id> <to_id>
 
 # Management
-ai-learn tags [--counts]
-ai-learn sources [--review]
-ai-learn sources --add "name" --description "..."
-ai-learn sources --merge "old" "new"
-ai-learn contexts
+ai-lessons tags [--counts]
+ai-lessons sources [--review]
+ai-lessons sources --add "name" --description "..."
+ai-lessons sources --merge "old" "new"
+ai-lessons contexts
 
 # Maintenance
-ai-learn export [--format json|yaml] [--tags ...] > backup.json
-ai-learn import < backup.json
-ai-learn reembed [--all | --lesson <id>]
-ai-learn stats
+ai-lessons export [--format json|yaml] [--tags ...] > backup.json
+ai-lessons import < backup.json
+ai-lessons reembed [--all | --lesson <id>]
+ai-lessons stats
 ```
 
 #### Interactive Mode Features
@@ -348,7 +348,7 @@ This section identifies potential failure modes and how the current design accom
    - Design support: `update_lesson()` already supports confidence changes
 
 3. **Confidence audit mode**
-   - CLI command: `ai-learn audit --confidence high --source inferred`
+   - CLI command: `ai-lessons audit --confidence high --source inferred`
    - Review lessons matching criteria
    - Design support: all fields are queryable, source/confidence are separate
 
@@ -372,8 +372,8 @@ This section identifies potential failure modes and how the current design accom
 **Future workarounds:**
 
 1. **Periodic normalization**
-   - `ai-learn tags --review` shows all tags with counts
-   - `ai-learn tags --merge "javascript" "js"` consolidates
+   - `ai-lessons tags --review` shows all tags with counts
+   - `ai-lessons tags --merge "javascript" "js"` consolidates
    - Design support: tag_relations table, merge function in core
 
 2. **Semantic tag deduplication**
@@ -547,7 +547,7 @@ This section identifies potential failure modes and how the current design accom
    - Design support: edges table with flexible relation
 
 3. **Review queue**
-   - `ai-learn review --stale-days 365` surfaces old lessons for validation
+   - `ai-lessons review --stale-days 365` surfaces old lessons for validation
    - Design support: timestamp queries already work
 
 ---
@@ -573,7 +573,7 @@ This section identifies potential failure modes and how the current design accom
    - Design support: edges table is simple to export
 
 3. **Prune weak edges**
-   - `ai-learn graph --prune --min-traversals 0` removes unused edges
+   - `ai-lessons graph --prune --min-traversals 0` removes unused edges
    - Design support: can add `traversal_count` to edges table
 
 ---
@@ -590,7 +590,7 @@ This section identifies potential failure modes and how the current design accom
 **Future workarounds:**
 
 1. **Sensitive tag filtering**
-   - `ai-learn export --exclude-tags sensitive,pii`
+   - `ai-lessons export --exclude-tags sensitive,pii`
    - Design support: tag filtering already in export
 
 2. **Encryption at rest**
@@ -707,7 +707,7 @@ def get_embedder():
 
 ### Initial Setup
 
-1. Create `~/.ai/aimem/` directory
+1. Create `~/.ai/lessons/` directory
 2. Initialize SQLite database with schema
 3. Seed reference tables (confidence_levels, source_types)
 4. Create default config.yaml
@@ -719,21 +719,21 @@ def get_embedder():
 
 ```bash
 # Check CLI
-ai-learn stats
-ai-learn tags
-ai-learn sources
+ai-lessons stats
+ai-lessons tags
+ai-lessons sources
 
 # Check MCP (via Claude)
-"List my tags using the aimem MCP"
+"List my tags using the ai-lessons MCP"
 
 # Add test lesson
-ai-learn add --title "Test lesson" --content "Testing" --tags test --confidence low --source tested
+ai-lessons add --title "Test lesson" --content "Testing" --tags test --confidence low --source tested
 
 # Verify search
-ai-learn search "test"
+ai-lessons search "test"
 
 # Clean up
-ai-learn delete <lesson_id>
+ai-lessons delete <lesson_id>
 ```
 
 ---

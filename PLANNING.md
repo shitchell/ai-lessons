@@ -37,7 +37,7 @@ An AI should save knowledge when:
 
 ### Project Scope Handling
 - NOT a dedicated `project` attribute
-- Projects are just another tag: `project:aimem`, `project:jira-tools`
+- Projects are just another tag: `project:ai-lessons`, `project:jira-tools`
 
 **Rationale**: `project` is an arbitrary scope. Other contexts (client, domain, language) are equally important. Hardcoding `project` as a first-class attribute creates artificial hierarchy. Tags are flexible enough for all contexts.
 
@@ -444,8 +444,8 @@ CLI: Creating source type "trial-and-error"
 - Or: require exact matches, return error with suggestions
 
 **Periodic cleanup:**
-- `ai-learn sources --review` shows all source types with usage counts
-- Merge similar entries: `ai-learn sources --merge "trial-and-error" "tested"`
+- `ai-lessons sources --review` shows all source types with usage counts
+- Merge similar entries: `ai-lessons sources --merge "trial-and-error" "tested"`
 - Same pattern works for any reference table
 
 **Rationale:** The interface layer abstracts away the FK complexity. Users/agents don't need to know about reference tables - they just use values, and the system handles consistency.
@@ -510,14 +510,14 @@ For Claude Code and MCP-compatible agents:
 ### CLI Tool
 For custom agents, Gemini, direct use:
 ```bash
-ai-learn add --title "..." --tags jira,api
-ai-learn search "query" --tags jira
-ai-learn related <id>
-ai-learn link <from> <to> --relation derived_from
-ai-learn show <id>
-ai-learn edit <id>
-ai-learn delete <id>
-ai-learn tags
+ai-lessons add --title "..." --tags jira,api
+ai-lessons search "query" --tags jira
+ai-lessons related <id>
+ai-lessons link <from> <to> --relation derived_from
+ai-lessons show <id>
+ai-lessons edit <id>
+ai-lessons delete <id>
+ai-lessons tags
 ```
 
 **Rationale**: MCP for Claude Code integration. CLI for everything else. Same SQLite backend ensures consistency.
@@ -708,7 +708,7 @@ CLI/MCP checks version on startup, runs migrations if needed.
 ```bash
 # After spending an hour debugging a Jira API issue:
 
-$ ai-learn add \
+$ ai-lessons add \
   --title "Jira workflow updates delete missing statuses" \
   --content "When calling PUT /rest/api/3/workflows, you must include ALL
              existing statuses and transitions. Any omitted items are deleted,
@@ -726,7 +726,7 @@ $ ai-learn add \
 ```bash
 # Later, about to update another workflow:
 
-$ ai-learn search "jira workflow update" --tags api
+$ ai-lessons search "jira workflow update" --tags api
 
 # Returns:
 # 1. [high] Jira workflow updates delete missing statuses
@@ -762,11 +762,11 @@ A separate project tracks:
 - How each change moves toward/away from goals
 - Derived rules: "if goal X and state Y, then do Z not W"
 
-**Relationship to aimem:**
+**Relationship to ai-lessons:**
 - Goal-tracking is more structured (state machines, causal graphs)
-- aimem is more free-form (prose lessons, tagged knowledge)
-- Goal-tracking could *feed into* aimem: "I learned X because experiment Y showed change Z improved goal W"
-- But aimem doesn't implement goal-tracking itself
+- ai-lessons is more free-form (prose lessons, tagged knowledge)
+- Goal-tracking could *feed into* ai-lessons: "I learned X because experiment Y showed change Z improved goal W"
+- But ai-lessons doesn't implement goal-tracking itself
 
 **Possible integration:**
 ```sql
@@ -778,7 +778,7 @@ CREATE TABLE lessons (
 );
 ```
 
-**Rationale:** Keep aimem focused on knowledge storage/retrieval. Goal-tracking is a separate system with different data models. They can reference each other without tight coupling.
+**Rationale:** Keep ai-lessons focused on knowledge storage/retrieval. Goal-tracking is a separate system with different data models. They can reference each other without tight coupling.
 
 ### Rationale as a Bridge (Future)
 
@@ -788,7 +788,7 @@ Rationale can be framed as: **rule** + (**desired state** || **value**)
 - Rationale describes *why* a rule exists relative to goals/values
 
 **Where rationale fits:**
-- aimem captures **lessons** (facts, observations, gotchas)
+- ai-lessons captures **lessons** (facts, observations, gotchas)
 - State-tracking captures **changes** and their **impact on goals**
 - Rationale would **caption the link** between a lesson and the state change(s) that produced it
 
@@ -803,10 +803,10 @@ Lesson: "Workflow updates delete missing statuses"
 State Change: { removed: "status X", result: "status deleted from workflow" }
 ```
 
-**Decision:** Defer rationale to the integration point between aimem and state-tracking. When combined:
-- aimem is the "dumping ground" for lessons learned from reviewing the state-change graph
+**Decision:** Defer rationale to the integration point between ai-lessons and state-tracking. When combined:
+- ai-lessons is the "dumping ground" for lessons learned from reviewing the state-change graph
 - Rationale provides the causal narrative linking lessons to state changes
-- This keeps aimem simple now while leaving room for richer integration later
+- This keeps ai-lessons simple now while leaving room for richer integration later
 
 ---
 
@@ -814,7 +814,7 @@ State Change: { removed: "status X", result: "status deleted from workflow" }
 
 ```
 ~/.ai/                        # Shared AI tools directory
-├── aimem/                    # This project
+├── lessons/                  # This project (ai-lessons)
 │   ├── knowledge.db          # SQLite: lessons, tags, edges, embeddings
 │   ├── config.yaml           # Tag aliases, settings
 │   └── mcp-server/
@@ -824,14 +824,14 @@ State Change: { removed: "status X", result: "status deleted from workflow" }
 └── ...
 
 ~/bin/ (or ~/.local/bin/)     # CLI tools on PATH
-└── ai-learn                  # Symlink or wrapper to aimem CLI
+└── ai-lessons                # Symlink or wrapper to ai-lessons CLI
 ```
 
 **Rationale**:
-- `~/.ai/` is a shared namespace for AI-related tools, not just aimem
+- `~/.ai/` is a shared namespace for AI-related tools, not just ai-lessons
 - Each project gets its own subdirectory
 - CLI tools go on PATH for easy access (symlinked from project dir)
-- Keeps aimem self-contained while allowing expansion
+- Keeps ai-lessons self-contained while allowing expansion
 
 ---
 
@@ -845,4 +845,4 @@ Building the Jira API search taught us:
 4. **Summaries help but don't capture gotchas** - Haiku summarizes docs, but experiential knowledge must be added manually.
 5. **Focused chunks embed better** - 29k char docs = diluted embeddings.
 
-These lessons directly informed the aimem architecture.
+These lessons directly informed the ai-lessons architecture.
