@@ -785,17 +785,25 @@ CREATE TABLE lessons (
 ## 19. File Structure
 
 ```
-~/.ai/
-├── knowledge.db              # SQLite: lessons, tags, edges, embeddings
-├── config.yaml               # Tag aliases, settings
-├── mcp-server/
-│   ├── server.py
-│   └── requirements.txt
-└── cli/
-    └── ai-learn
+~/.ai/                        # Shared AI tools directory
+├── aimem/                    # This project
+│   ├── knowledge.db          # SQLite: lessons, tags, edges, embeddings
+│   ├── config.yaml           # Tag aliases, settings
+│   └── mcp-server/
+│       ├── server.py
+│       └── requirements.txt
+├── <other-project>/          # Future AI tools live alongside
+└── ...
+
+~/bin/ (or ~/.local/bin/)     # CLI tools on PATH
+└── ai-learn                  # Symlink or wrapper to aimem CLI
 ```
 
-**Rationale**: Single DB file for portability. Config separate for easy editing. MCP and CLI as separate entry points to same backend.
+**Rationale**:
+- `~/.ai/` is a shared namespace for AI-related tools, not just aimem
+- Each project gets its own subdirectory
+- CLI tools go on PATH for easy access (symlinked from project dir)
+- Keeps aimem self-contained while allowing expansion
 
 ---
 
