@@ -104,10 +104,14 @@ search:
   hybrid_weight_semantic: 0.7
   hybrid_weight_keyword: 0.3
 
-# Embedding model
+# Embedding model (default: sentence-transformers, optional: openai)
 embedding:
-  model: all-MiniLM-L6-v2
-  # model: text-embedding-3-small  # OpenAI alternative
+  backend: sentence-transformers  # or: openai
+  model: all-MiniLM-L6-v2         # sentence-transformers model
+  # For OpenAI:
+  # backend: openai
+  # model: text-embedding-3-small
+  # api_key: ${OPENAI_API_KEY}    # or set in environment
 ```
 
 ---
