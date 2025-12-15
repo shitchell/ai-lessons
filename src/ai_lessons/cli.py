@@ -75,14 +75,36 @@ def _format_search_result(result: SearchResult, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
+# =============================================================================
+# Main CLI group
+# =============================================================================
+
 @click.group()
 @click.version_option()
 def main():
-    """AI Lessons - Knowledge management with semantic search."""
+    """AI Lessons - Knowledge management with semantic search.
+
+    Commands are organized into three groups:
+
+    \b
+      admin   Database and system management
+      learn   Create and modify lessons
+      recall  Search and view lessons
+    """
     pass
 
 
-@main.command()
+# =============================================================================
+# ADMIN group - Database and system management
+# =============================================================================
+
+@main.group()
+def admin():
+    """Database and system management commands."""
+    pass
+
+
+@admin.command()
 @click.option("--force", is_flag=True, help="Reinitialize even if database exists")
 def init(force: bool):
     """Initialize the database and configuration."""
@@ -104,267 +126,7 @@ def init(force: bool):
     click.echo(f"  Config: {config_path}")
 
 
-@main.command()
-@click.option("--title", "-t", required=True, help="Lesson title")
-@click.option("--content", "-c", help="Lesson content (or use stdin)")
-@click.option("--tags", help="Comma-separated tags")
-@click.option("--context", "contexts", multiple=True, help="Context where this applies")
-@click.option("--anti-context", "anti_contexts", multiple=True, help="Context where this does NOT apply")
-@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
-@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
-@click.option("--source-notes", help="Notes about the source")
-def add(
-    title: str,
-    content: Optional[str],
-    tags: Optional[str],
-    contexts: tuple,
-    anti_contexts: tuple,
-    confidence: Optional[str],
-    source: Optional[str],
-    source_notes: Optional[str],
-):
-    """Add a new lesson."""
-    # Read content from stdin if not provided
-    if content is None:
-        if sys.stdin.isatty():
-            click.echo("Enter content (Ctrl+D to finish):")
-        content = sys.stdin.read().strip()
-
-    if not content:
-        click.echo("Error: Content is required", err=True)
-        sys.exit(1)
-
-    lesson_id = core.add_lesson(
-        title=title,
-        content=content,
-        tags=_parse_tags(tags),
-        contexts=list(contexts) if contexts else None,
-        anti_contexts=list(anti_contexts) if anti_contexts else None,
-        confidence=confidence,
-        source=source,
-        source_notes=source_notes,
-    )
-
-    click.echo(f"Added lesson: {lesson_id}")
-
-
-@main.command()
-@click.argument("query")
-@click.option("--tags", help="Filter by comma-separated tags")
-@click.option("--context", help="Filter by context")
-@click.option("--confidence-min", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
-@click.option("--source", help="Filter by source type")
-@click.option("--limit", "-n", default=10, help="Maximum results")
-@click.option("--strategy", type=click.Choice(["hybrid", "semantic", "keyword"]), default="hybrid")
-@click.option("--verbose", "-v", is_flag=True, help="Show content preview")
-def search(
-    query: str,
-    tags: Optional[str],
-    context: Optional[str],
-    confidence_min: Optional[str],
-    source: Optional[str],
-    limit: int,
-    strategy: str,
-    verbose: bool,
-):
-    """Search for lessons."""
-    results = core.recall(
-        query=query,
-        tags=_parse_tags(tags),
-        contexts=[context] if context else None,
-        confidence_min=confidence_min,
-        source=source,
-        limit=limit,
-        strategy=strategy,
-    )
-
-    if not results:
-        click.echo("No results found.")
-        return
-
-    for result in results:
-        click.echo(_format_search_result(result, verbose))
-        click.echo()
-
-
-@main.command()
-@click.argument("lesson_id")
-def show(lesson_id: str):
-    """Show a lesson by ID."""
-    lesson = core.get_lesson(lesson_id)
-
-    if lesson is None:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
-
-    click.echo(_format_lesson(lesson, verbose=True))
-
-
-@main.command()
-@click.argument("lesson_id")
-@click.option("--title", "-t", help="New title")
-@click.option("--content", "-c", help="New content")
-@click.option("--tags", help="New comma-separated tags (replaces existing)")
-@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
-@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
-@click.option("--source-notes", help="New source notes")
-def update(
-    lesson_id: str,
-    title: Optional[str],
-    content: Optional[str],
-    tags: Optional[str],
-    confidence: Optional[str],
-    source: Optional[str],
-    source_notes: Optional[str],
-):
-    """Update an existing lesson."""
-    success = core.update_lesson(
-        lesson_id=lesson_id,
-        title=title,
-        content=content,
-        tags=_parse_tags(tags),
-        confidence=confidence,
-        source=source,
-        source_notes=source_notes,
-    )
-
-    if success:
-        click.echo(f"Updated lesson: {lesson_id}")
-    else:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
-
-
-@main.command()
-@click.argument("lesson_id")
-@click.confirmation_option(prompt="Are you sure you want to delete this lesson?")
-def delete(lesson_id: str):
-    """Delete a lesson."""
-    success = core.delete_lesson(lesson_id)
-
-    if success:
-        click.echo(f"Deleted lesson: {lesson_id}")
-    else:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
-
-
-@main.command()
-@click.argument("lesson_id")
-@click.option("--depth", "-d", default=1, help="Traversal depth")
-@click.option("--relation", "-r", multiple=True, help="Filter by relation type")
-def related(lesson_id: str, depth: int, relation: tuple):
-    """Show lessons related to a given lesson."""
-    lessons = core.get_related(
-        lesson_id=lesson_id,
-        depth=depth,
-        relations=list(relation) if relation else None,
-    )
-
-    if not lessons:
-        click.echo("No related lessons found.")
-        return
-
-    for lesson in lessons:
-        click.echo(_format_lesson(lesson))
-        click.echo()
-
-
-@main.command()
-@click.argument("from_id")
-@click.argument("to_id")
-@click.option("--relation", "-r", required=True, help="Relationship type (e.g., related_to, derived_from)")
-def link(from_id: str, to_id: str, relation: str):
-    """Create a link between two lessons."""
-    success = core.link_lessons(from_id, to_id, relation)
-
-    if success:
-        click.echo(f"Linked {from_id} --[{relation}]--> {to_id}")
-    else:
-        click.echo("Link already exists or lessons not found.", err=True)
-        sys.exit(1)
-
-
-@main.command()
-@click.argument("from_id")
-@click.argument("to_id")
-@click.option("--relation", "-r", help="Specific relation to remove (all if not specified)")
-def unlink(from_id: str, to_id: str, relation: Optional[str]):
-    """Remove link(s) between two lessons."""
-    count = core.unlink_lessons(from_id, to_id, relation)
-    click.echo(f"Removed {count} link(s)")
-
-
-@main.command("tags")
-@click.option("--counts", is_flag=True, help="Show usage counts")
-def list_tags(counts: bool):
-    """List all tags."""
-    tags = core.list_tags(with_counts=counts)
-
-    if not tags:
-        click.echo("No tags found.")
-        return
-
-    for tag in tags:
-        if counts:
-            click.echo(f"{tag.name} ({tag.count})")
-        else:
-            click.echo(tag.name)
-
-
-@main.command("sources")
-def list_sources():
-    """List all source types."""
-    sources = core.list_sources()
-
-    for source in sources:
-        click.echo(f"{source.name}")
-        if source.description:
-            click.echo(f"  {source.description}")
-        if source.typical_confidence:
-            click.echo(f"  typical confidence: {source.typical_confidence}")
-
-
-@main.command("confidence")
-def list_confidence():
-    """List all confidence levels."""
-    levels = core.list_confidence_levels()
-
-    for level in levels:
-        click.echo(f"{level.ordinal}. {level.name}")
-
-
-@main.group()
-def manage():
-    """Management commands for tags, sources, etc."""
-    pass
-
-
-@manage.command("merge-tags")
-@click.argument("from_tag")
-@click.argument("to_tag")
-def merge_tags(from_tag: str, to_tag: str):
-    """Merge one tag into another."""
-    count = core.merge_tags(from_tag, to_tag)
-    click.echo(f"Merged '{from_tag}' into '{to_tag}' ({count} lessons affected)")
-
-
-@manage.command("add-source")
-@click.argument("name")
-@click.option("--description", "-d", help="Source description")
-@click.option("--typical-confidence", help="Typical confidence for this source")
-def add_source(name: str, description: Optional[str], typical_confidence: Optional[str]):
-    """Add a new source type."""
-    success = core.add_source(name, description, typical_confidence)
-
-    if success:
-        click.echo(f"Added source type: {name}")
-    else:
-        click.echo(f"Source type already exists: {name}", err=True)
-        sys.exit(1)
-
-
-@main.command()
+@admin.command()
 def stats():
     """Show database statistics."""
     config = get_config()
@@ -411,6 +173,280 @@ def stats():
         click.echo("\nBy source:")
         for src, count in source_counts.items():
             click.echo(f"  {src or 'unset'}: {count}")
+
+
+@admin.command("merge-tags")
+@click.argument("from_tag")
+@click.argument("to_tag")
+def merge_tags(from_tag: str, to_tag: str):
+    """Merge one tag into another."""
+    count = core.merge_tags(from_tag, to_tag)
+    click.echo(f"Merged '{from_tag}' into '{to_tag}' ({count} lessons affected)")
+
+
+@admin.command("add-source")
+@click.argument("name")
+@click.option("--description", "-d", help="Source description")
+@click.option("--typical-confidence", help="Typical confidence for this source")
+def add_source(name: str, description: Optional[str], typical_confidence: Optional[str]):
+    """Add a new source type."""
+    success = core.add_source(name, description, typical_confidence)
+
+    if success:
+        click.echo(f"Added source type: {name}")
+    else:
+        click.echo(f"Source type already exists: {name}", err=True)
+        sys.exit(1)
+
+
+# =============================================================================
+# LEARN group - Create and modify lessons
+# =============================================================================
+
+@main.group()
+def learn():
+    """Create and modify lessons."""
+    pass
+
+
+@learn.command()
+@click.option("--title", "-t", required=True, help="Lesson title")
+@click.option("--content", "-c", help="Lesson content (or use stdin)")
+@click.option("--tags", help="Comma-separated tags")
+@click.option("--context", "contexts", multiple=True, help="Context where this applies")
+@click.option("--anti-context", "anti_contexts", multiple=True, help="Context where this does NOT apply")
+@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
+@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
+@click.option("--source-notes", help="Notes about the source")
+def add(
+    title: str,
+    content: Optional[str],
+    tags: Optional[str],
+    contexts: tuple,
+    anti_contexts: tuple,
+    confidence: Optional[str],
+    source: Optional[str],
+    source_notes: Optional[str],
+):
+    """Add a new lesson."""
+    # Read content from stdin if not provided
+    if content is None:
+        if sys.stdin.isatty():
+            click.echo("Enter content (Ctrl+D to finish):")
+        content = sys.stdin.read().strip()
+
+    if not content:
+        click.echo("Error: Content is required", err=True)
+        sys.exit(1)
+
+    lesson_id = core.add_lesson(
+        title=title,
+        content=content,
+        tags=_parse_tags(tags),
+        contexts=list(contexts) if contexts else None,
+        anti_contexts=list(anti_contexts) if anti_contexts else None,
+        confidence=confidence,
+        source=source,
+        source_notes=source_notes,
+    )
+
+    click.echo(f"Added lesson: {lesson_id}")
+
+
+@learn.command()
+@click.argument("lesson_id")
+@click.option("--title", "-t", help="New title")
+@click.option("--content", "-c", help="New content")
+@click.option("--tags", help="New comma-separated tags (replaces existing)")
+@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
+@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
+@click.option("--source-notes", help="New source notes")
+def update(
+    lesson_id: str,
+    title: Optional[str],
+    content: Optional[str],
+    tags: Optional[str],
+    confidence: Optional[str],
+    source: Optional[str],
+    source_notes: Optional[str],
+):
+    """Update an existing lesson."""
+    success = core.update_lesson(
+        lesson_id=lesson_id,
+        title=title,
+        content=content,
+        tags=_parse_tags(tags),
+        confidence=confidence,
+        source=source,
+        source_notes=source_notes,
+    )
+
+    if success:
+        click.echo(f"Updated lesson: {lesson_id}")
+    else:
+        click.echo(f"Lesson not found: {lesson_id}", err=True)
+        sys.exit(1)
+
+
+@learn.command()
+@click.argument("lesson_id")
+@click.confirmation_option(prompt="Are you sure you want to delete this lesson?")
+def delete(lesson_id: str):
+    """Delete a lesson."""
+    success = core.delete_lesson(lesson_id)
+
+    if success:
+        click.echo(f"Deleted lesson: {lesson_id}")
+    else:
+        click.echo(f"Lesson not found: {lesson_id}", err=True)
+        sys.exit(1)
+
+
+@learn.command()
+@click.argument("from_id")
+@click.argument("to_id")
+@click.option("--relation", "-r", required=True, help="Relationship type (e.g., related_to, derived_from)")
+def link(from_id: str, to_id: str, relation: str):
+    """Create a link between two lessons."""
+    success = core.link_lessons(from_id, to_id, relation)
+
+    if success:
+        click.echo(f"Linked {from_id} --[{relation}]--> {to_id}")
+    else:
+        click.echo("Link already exists or lessons not found.", err=True)
+        sys.exit(1)
+
+
+@learn.command()
+@click.argument("from_id")
+@click.argument("to_id")
+@click.option("--relation", "-r", help="Specific relation to remove (all if not specified)")
+def unlink(from_id: str, to_id: str, relation: Optional[str]):
+    """Remove link(s) between two lessons."""
+    count = core.unlink_lessons(from_id, to_id, relation)
+    click.echo(f"Removed {count} link(s)")
+
+
+# =============================================================================
+# RECALL group - Search and view lessons
+# =============================================================================
+
+@main.group()
+def recall():
+    """Search and view lessons."""
+    pass
+
+
+@recall.command()
+@click.argument("query")
+@click.option("--tags", help="Filter by comma-separated tags")
+@click.option("--context", help="Filter by context")
+@click.option("--confidence-min", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
+@click.option("--source", help="Filter by source type")
+@click.option("--limit", "-n", default=10, help="Maximum results")
+@click.option("--strategy", type=click.Choice(["hybrid", "semantic", "keyword"]), default="hybrid")
+@click.option("--verbose", "-v", is_flag=True, help="Show content preview")
+def search(
+    query: str,
+    tags: Optional[str],
+    context: Optional[str],
+    confidence_min: Optional[str],
+    source: Optional[str],
+    limit: int,
+    strategy: str,
+    verbose: bool,
+):
+    """Search for lessons."""
+    results = core.recall(
+        query=query,
+        tags=_parse_tags(tags),
+        contexts=[context] if context else None,
+        confidence_min=confidence_min,
+        source=source,
+        limit=limit,
+        strategy=strategy,
+    )
+
+    if not results:
+        click.echo("No results found.")
+        return
+
+    for result in results:
+        click.echo(_format_search_result(result, verbose))
+        click.echo()
+
+
+@recall.command()
+@click.argument("lesson_id")
+def show(lesson_id: str):
+    """Show a lesson by ID."""
+    lesson = core.get_lesson(lesson_id)
+
+    if lesson is None:
+        click.echo(f"Lesson not found: {lesson_id}", err=True)
+        sys.exit(1)
+
+    click.echo(_format_lesson(lesson, verbose=True))
+
+
+@recall.command()
+@click.argument("lesson_id")
+@click.option("--depth", "-d", default=1, help="Traversal depth")
+@click.option("--relation", "-r", multiple=True, help="Filter by relation type")
+def related(lesson_id: str, depth: int, relation: tuple):
+    """Show lessons related to a given lesson."""
+    lessons = core.get_related(
+        lesson_id=lesson_id,
+        depth=depth,
+        relations=list(relation) if relation else None,
+    )
+
+    if not lessons:
+        click.echo("No related lessons found.")
+        return
+
+    for lesson in lessons:
+        click.echo(_format_lesson(lesson))
+        click.echo()
+
+
+@recall.command("tags")
+@click.option("--counts", is_flag=True, help="Show usage counts")
+def list_tags(counts: bool):
+    """List all tags."""
+    tags = core.list_tags(with_counts=counts)
+
+    if not tags:
+        click.echo("No tags found.")
+        return
+
+    for tag in tags:
+        if counts:
+            click.echo(f"{tag.name} ({tag.count})")
+        else:
+            click.echo(tag.name)
+
+
+@recall.command("sources")
+def list_sources():
+    """List all source types."""
+    sources = core.list_sources()
+
+    for source in sources:
+        click.echo(f"{source.name}")
+        if source.description:
+            click.echo(f"  {source.description}")
+        if source.typical_confidence:
+            click.echo(f"  typical confidence: {source.typical_confidence}")
+
+
+@recall.command("confidence")
+def list_confidence():
+    """List all confidence levels."""
+    levels = core.list_confidence_levels()
+
+    for level in levels:
+        click.echo(f"{level.ordinal}. {level.name}")
 
 
 if __name__ == "__main__":
