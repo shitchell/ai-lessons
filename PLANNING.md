@@ -780,6 +780,34 @@ CREATE TABLE lessons (
 
 **Rationale:** Keep aimem focused on knowledge storage/retrieval. Goal-tracking is a separate system with different data models. They can reference each other without tight coupling.
 
+### Rationale as a Bridge (Future)
+
+Rationale can be framed as: **rule** + (**desired state** || **value**)
+
+- Desired state and value are arguably equivalent (e.g., "honesty" as a value = "desired state of alignment with principles")
+- Rationale describes *why* a rule exists relative to goals/values
+
+**Where rationale fits:**
+- aimem captures **lessons** (facts, observations, gotchas)
+- State-tracking captures **changes** and their **impact on goals**
+- Rationale would **caption the link** between a lesson and the state change(s) that produced it
+
+**Example:**
+```
+Lesson: "Workflow updates delete missing statuses"
+    ↑
+    | rationale: "Discovered while pursuing goal 'reliable workflow updates';
+    |             state change 'removed status X from payload' caused
+    |             unintended deletion, violating goal"
+    ↓
+State Change: { removed: "status X", result: "status deleted from workflow" }
+```
+
+**Decision:** Defer rationale to the integration point between aimem and state-tracking. When combined:
+- aimem is the "dumping ground" for lessons learned from reviewing the state-change graph
+- Rationale provides the causal narrative linking lessons to state changes
+- This keeps aimem simple now while leaving room for richer integration later
+
 ---
 
 ## 19. File Structure
