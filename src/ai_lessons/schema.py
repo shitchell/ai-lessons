@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Schema creation SQL
 SCHEMA_SQL = """
@@ -179,9 +179,12 @@ CREATE INDEX IF NOT EXISTS idx_search_feedback_created ON search_feedback(create
 
 -- v9: Resource anchors (markdown link metadata for edges)
 -- Stores anchor-specific metadata for resource→resource and chunk→chunk edges
+-- Links are stored even before targets are imported (edge_id NULL until resolved)
 CREATE TABLE IF NOT EXISTS resource_anchors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    edge_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+    from_id TEXT NOT NULL,                  -- Source resource/chunk ID
+    from_type TEXT NOT NULL CHECK (from_type IN ('resource', 'chunk')),
+    edge_id INTEGER REFERENCES edges(id) ON DELETE SET NULL,  -- NULL until resolved
     to_path TEXT NOT NULL,                  -- Original markdown path before resolution
     to_fragment TEXT,                       -- Fragment/anchor without #
     link_text TEXT                          -- Display text from [text](path)
@@ -190,6 +193,7 @@ CREATE TABLE IF NOT EXISTS resource_anchors (
 -- v9: Indexes for resource_anchors
 CREATE INDEX IF NOT EXISTS idx_resource_anchors_edge ON resource_anchors(edge_id);
 CREATE INDEX IF NOT EXISTS idx_resource_anchors_path ON resource_anchors(to_path);
+CREATE INDEX IF NOT EXISTS idx_resource_anchors_from ON resource_anchors(from_id, from_type);
 
 -- v2: Indexes for resources
 CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type);

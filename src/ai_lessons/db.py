@@ -346,10 +346,13 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
         # 4. Create resource_anchors table (FK to edges_new, will be valid after rename)
         # Note: We create this with no FK, then drop/recreate after rename to avoid
         # SQLite's FK reference issues when renaming tables
+        # Include from_id/from_type for dangling link support (edge_id nullable)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS resource_anchors_temp (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                edge_id INTEGER NOT NULL,
+                from_id TEXT NOT NULL,
+                from_type TEXT NOT NULL,
+                edge_id INTEGER,
                 to_path TEXT NOT NULL,
                 to_fragment TEXT,
                 link_text TEXT
@@ -357,14 +360,14 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
         """)
 
         # 5. Migrate resource_links to edges + resource_anchors
+        # Migrate ALL links (both resolved and unresolved)
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_links'")
         if cursor.fetchone():
-            # Get all resource_links with resolved targets
+            # Get ALL resource_links (resolved and unresolved)
             cursor = conn.execute("""
                 SELECT id, from_resource_id, from_chunk_id, to_path, to_fragment, link_text,
                        resolved_resource_id, resolved_chunk_id
                 FROM resource_links
-                WHERE resolved_resource_id IS NOT NULL
             """)
 
             for row in cursor.fetchall():
@@ -376,33 +379,38 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
                     from_id = row["from_resource_id"]
                     from_type = "resource"
 
-                # Determine to_type and to_id
-                if row["resolved_chunk_id"]:
-                    to_id = row["resolved_chunk_id"]
-                    to_type = "chunk"
-                else:
-                    to_id = row["resolved_resource_id"]
-                    to_type = "resource"
+                edge_id = None
 
-                # Insert edge
-                conn.execute("""
-                    INSERT OR IGNORE INTO edges_new (from_id, from_type, to_id, to_type, relation)
-                    VALUES (?, ?, ?, ?, 'references')
-                """, (from_id, from_type, to_id, to_type))
+                # Only create edge if link is resolved
+                if row["resolved_resource_id"]:
+                    # Determine to_type and to_id
+                    if row["resolved_chunk_id"]:
+                        to_id = row["resolved_chunk_id"]
+                        to_type = "chunk"
+                    else:
+                        to_id = row["resolved_resource_id"]
+                        to_type = "resource"
 
-                # Get the edge ID
-                edge_cursor = conn.execute("""
-                    SELECT id FROM edges_new
-                    WHERE from_id = ? AND from_type = ? AND to_id = ? AND to_type = ? AND relation = 'references'
-                """, (from_id, from_type, to_id, to_type))
-                edge_row = edge_cursor.fetchone()
-
-                if edge_row:
-                    # Insert anchor metadata
+                    # Insert edge
                     conn.execute("""
-                        INSERT INTO resource_anchors_temp (edge_id, to_path, to_fragment, link_text)
-                        VALUES (?, ?, ?, ?)
-                    """, (edge_row["id"], row["to_path"], row["to_fragment"], row["link_text"]))
+                        INSERT OR IGNORE INTO edges_new (from_id, from_type, to_id, to_type, relation)
+                        VALUES (?, ?, ?, ?, 'references')
+                    """, (from_id, from_type, to_id, to_type))
+
+                    # Get the edge ID
+                    edge_cursor = conn.execute("""
+                        SELECT id FROM edges_new
+                        WHERE from_id = ? AND from_type = ? AND to_id = ? AND to_type = ? AND relation = 'references'
+                    """, (from_id, from_type, to_id, to_type))
+                    edge_row = edge_cursor.fetchone()
+                    if edge_row:
+                        edge_id = edge_row["id"]
+
+                # Insert anchor (with or without edge_id)
+                conn.execute("""
+                    INSERT INTO resource_anchors_temp (from_id, from_type, edge_id, to_path, to_fragment, link_text)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (from_id, from_type, edge_id, row["to_path"], row["to_fragment"], row["link_text"]))
 
             conn.execute("DROP TABLE resource_links")
 
@@ -411,10 +419,13 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
         conn.execute("ALTER TABLE edges_new RENAME TO edges")
 
         # 7. Create final resource_anchors table with proper FK to edges
+        # edge_id is nullable to support dangling links (unresolved targets)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS resource_anchors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                edge_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+                from_id TEXT NOT NULL,
+                from_type TEXT NOT NULL CHECK (from_type IN ('resource', 'chunk')),
+                edge_id INTEGER REFERENCES edges(id) ON DELETE SET NULL,
                 to_path TEXT NOT NULL,
                 to_fragment TEXT,
                 link_text TEXT
@@ -423,8 +434,8 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
 
         # 8. Migrate data from temp table
         conn.execute("""
-            INSERT INTO resource_anchors (id, edge_id, to_path, to_fragment, link_text)
-            SELECT id, edge_id, to_path, to_fragment, link_text FROM resource_anchors_temp
+            INSERT INTO resource_anchors (id, from_id, from_type, edge_id, to_path, to_fragment, link_text)
+            SELECT id, from_id, from_type, edge_id, to_path, to_fragment, link_text FROM resource_anchors_temp
         """)
         conn.execute("DROP TABLE IF EXISTS resource_anchors_temp")
 
@@ -434,8 +445,49 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_edge ON resource_anchors(edge_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_path ON resource_anchors(to_path)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_from ON resource_anchors(from_id, from_type)")
 
         current_version = 9
+
+    if current_version < 10:
+        # v10: Add from_id/from_type columns to resource_anchors for dangling link support
+        # Make edge_id nullable
+
+        # Check if columns already exist (fresh v9+ installs will have them)
+        cursor = conn.execute("PRAGMA table_info(resource_anchors)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "from_id" not in existing_cols:
+            # Need to recreate table since SQLite doesn't support changing NOT NULL constraint
+            conn.execute("""
+                CREATE TABLE resource_anchors_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_id TEXT NOT NULL,
+                    from_type TEXT NOT NULL CHECK (from_type IN ('resource', 'chunk')),
+                    edge_id INTEGER REFERENCES edges(id) ON DELETE SET NULL,
+                    to_path TEXT NOT NULL,
+                    to_fragment TEXT,
+                    link_text TEXT
+                )
+            """)
+
+            # Migrate data, deriving from_id/from_type from the edge
+            conn.execute("""
+                INSERT INTO resource_anchors_new (id, from_id, from_type, edge_id, to_path, to_fragment, link_text)
+                SELECT ra.id, e.from_id, e.from_type, ra.edge_id, ra.to_path, ra.to_fragment, ra.link_text
+                FROM resource_anchors ra
+                JOIN edges e ON ra.edge_id = e.id
+            """)
+
+            conn.execute("DROP TABLE resource_anchors")
+            conn.execute("ALTER TABLE resource_anchors_new RENAME TO resource_anchors")
+
+            # Recreate indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_edge ON resource_anchors(edge_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_path ON resource_anchors(to_path)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_from ON resource_anchors(from_id, from_type)")
+
+        current_version = 10
 
     # Update schema version
     conn.execute(

@@ -484,10 +484,10 @@ class TestResourceAnchors:
             )
             edge_id = cursor.fetchone()["id"]
 
-            # Create anchor metadata
+            # Create anchor metadata (from_id/from_type must match the edge's from_id/from_type)
             conn.execute(
-                """INSERT INTO resource_anchors (edge_id, to_path, to_fragment, link_text)
-                   VALUES (?, '../other/doc.md', 'section-1', 'See Section 1')""",
+                """INSERT INTO resource_anchors (from_id, from_type, edge_id, to_path, to_fragment, link_text)
+                   VALUES ('chunk1', 'chunk', ?, '../other/doc.md', 'section-1', 'See Section 1')""",
                 (edge_id,),
             )
             conn.commit()
@@ -502,8 +502,8 @@ class TestResourceAnchors:
             assert anchor["to_fragment"] == "section-1"
             assert anchor["link_text"] == "See Section 1"
 
-    def test_anchor_cascades_on_edge_delete(self, temp_config):
-        """Test that anchor is deleted when edge is deleted."""
+    def test_anchor_edge_id_nulled_on_edge_delete(self, temp_config):
+        """Test that anchor edge_id is set to NULL when edge is deleted (SET NULL)."""
         with get_db(temp_config) as conn:
             # Create edge and anchor
             conn.execute(
@@ -514,26 +514,29 @@ class TestResourceAnchors:
             edge_id = cursor.fetchone()["id"]
 
             conn.execute(
-                """INSERT INTO resource_anchors (edge_id, to_path, link_text)
-                   VALUES (?, 'path/to/doc.md', 'Link Text')""",
+                """INSERT INTO resource_anchors (from_id, from_type, edge_id, to_path, link_text)
+                   VALUES ('from1', 'resource', ?, 'path/to/doc.md', 'Link Text')""",
                 (edge_id,),
             )
             conn.commit()
 
-            # Verify anchor exists
+            # Verify anchor exists with edge_id
             cursor = conn.execute(
-                "SELECT COUNT(*) as count FROM resource_anchors WHERE edge_id = ?",
-                (edge_id,),
+                "SELECT id, edge_id FROM resource_anchors WHERE from_id = 'from1'"
             )
-            assert cursor.fetchone()["count"] == 1
+            anchor = cursor.fetchone()
+            anchor_id = anchor["id"]
+            assert anchor["edge_id"] == edge_id
 
             # Delete edge
             conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
             conn.commit()
 
-            # Anchor should be gone (CASCADE)
+            # Anchor should still exist but edge_id should be NULL (SET NULL)
             cursor = conn.execute(
-                "SELECT COUNT(*) as count FROM resource_anchors WHERE edge_id = ?",
-                (edge_id,),
+                "SELECT edge_id FROM resource_anchors WHERE id = ?",
+                (anchor_id,),
             )
-            assert cursor.fetchone()["count"] == 0
+            anchor = cursor.fetchone()
+            assert anchor is not None  # Anchor still exists
+            assert anchor["edge_id"] is None  # edge_id set to NULL

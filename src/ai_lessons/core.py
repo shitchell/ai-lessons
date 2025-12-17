@@ -1397,12 +1397,14 @@ def _store_and_resolve_links(
         if from_chunk_id and from_chunk_id == resolved_chunk_id:
             continue
 
-        # Only create edge if we resolved the target
-        if resolved_resource_id:
-            # Determine from entity
-            from_id = from_chunk_id if from_chunk_id else resource_id
-            from_type = "chunk" if from_chunk_id else "resource"
+        # Determine from entity
+        from_id = from_chunk_id if from_chunk_id else resource_id
+        from_type = "chunk" if from_chunk_id else "resource"
 
+        edge_id = None
+
+        # Create edge if we resolved the target
+        if resolved_resource_id:
             # Determine to entity
             to_id = resolved_chunk_id if resolved_chunk_id else resolved_resource_id
             to_type = "chunk" if resolved_chunk_id else "resource"
@@ -1421,14 +1423,16 @@ def _store_and_resolve_links(
                 (from_id, from_type, to_id, to_type),
             )
             edge_row = cursor.fetchone()
-
             if edge_row:
-                conn.execute(
-                    """INSERT INTO resource_anchors (edge_id, to_path, to_fragment, link_text)
-                       VALUES (?, ?, ?, ?)""",
-                    (edge_row["id"], link.absolute_path, link.fragment, link.link_text),
-                )
-                count += 1
+                edge_id = edge_row["id"]
+
+        # Store anchor (with or without edge_id for unresolved links)
+        conn.execute(
+            """INSERT INTO resource_anchors (from_id, from_type, edge_id, to_path, to_fragment, link_text)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (from_id, from_type, edge_id, link.absolute_path, link.fragment, link.link_text),
+        )
+        count += 1
 
     return count
 
@@ -1440,9 +1444,8 @@ def _resolve_dangling_links(
 ) -> int:
     """Find and resolve links pointing to this newly imported resource.
 
-    Note: With schema v9, unresolved links are not stored (only resolved links
-    create edges). To resolve previously dangling links, re-import the source
-    resources.
+    Searches for anchors where to_path matches the new resource's path and
+    edge_id is NULL (unresolved). Creates edges and updates the anchors.
 
     Args:
         conn: Database connection.
@@ -1450,11 +1453,55 @@ def _resolve_dangling_links(
         new_resource_id: ID of the newly imported resource.
 
     Returns:
-        Number of links resolved (always 0 in v9+).
+        Number of links resolved.
     """
-    # v9: Dangling links are not stored, so there's nothing to resolve.
-    # Re-import source resources to create edges for newly resolvable links.
-    return 0
+    # Find unresolved anchors pointing to this path
+    cursor = conn.execute(
+        """SELECT id, from_id, from_type, to_path, to_fragment
+           FROM resource_anchors
+           WHERE to_path = ? AND edge_id IS NULL""",
+        (new_resource_path,),
+    )
+    anchors = cursor.fetchall()
+
+    count = 0
+    for anchor in anchors:
+        # Resolve fragment to chunk if applicable
+        to_id = new_resource_id
+        to_type = "resource"
+
+        if anchor["to_fragment"]:
+            resolved_chunk_id = resolve_fragment_to_chunk(
+                conn, new_resource_id, anchor["to_fragment"]
+            )
+            if resolved_chunk_id:
+                to_id = resolved_chunk_id
+                to_type = "chunk"
+
+        # Create edge
+        conn.execute(
+            """INSERT OR IGNORE INTO edges (from_id, from_type, to_id, to_type, relation)
+               VALUES (?, ?, ?, ?, 'references')""",
+            (anchor["from_id"], anchor["from_type"], to_id, to_type),
+        )
+
+        # Get edge ID
+        edge_cursor = conn.execute(
+            """SELECT id FROM edges
+               WHERE from_id = ? AND from_type = ? AND to_id = ? AND to_type = ? AND relation = 'references'""",
+            (anchor["from_id"], anchor["from_type"], to_id, to_type),
+        )
+        edge_row = edge_cursor.fetchone()
+
+        if edge_row:
+            # Update anchor with edge_id
+            conn.execute(
+                "UPDATE resource_anchors SET edge_id = ? WHERE id = ?",
+                (edge_row["id"], anchor["id"]),
+            )
+            count += 1
+
+    return count
 
 
 def get_resource_by_path(
