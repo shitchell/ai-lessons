@@ -1035,7 +1035,7 @@ Run pip install to setup.
         # If it's a chunk result, should have breadcrumb info
         result = results[0]
         if result.result_type == "chunk":
-            assert result.chunk_breadcrumb is not None or result.title is not None
+            assert result.breadcrumb is not None or result.title is not None
             # Title should include hierarchy
             assert ">" in result.title or "Main Guide" in result.title or "Prerequisites" in result.title
 

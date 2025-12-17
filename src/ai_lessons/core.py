@@ -1,9 +1,14 @@
 """Core API for ai-lessons."""
 
+from __future__ import annotations
+
 import json
+import sqlite3
 import struct
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from ulid import ULID
@@ -190,6 +195,197 @@ def _generate_id() -> str:
     return str(ULID())
 
 
+# --- Tag Helpers ---
+
+
+def _save_tags(
+    conn,
+    entity_id: str,
+    entity_type: str,
+    tags: Optional[list[str]],
+) -> None:
+    """Save tags for an entity.
+
+    Args:
+        conn: Database connection (within transaction).
+        entity_id: ID of the entity.
+        entity_type: One of 'lesson', 'resource', 'rule'.
+        tags: List of tags to save.
+    """
+    if not tags:
+        return
+
+    table_map = {
+        'lesson': ('lesson_tags', 'lesson_id'),
+        'resource': ('resource_tags', 'resource_id'),
+        'rule': ('rule_tags', 'rule_id'),
+    }
+
+    if entity_type not in table_map:
+        raise ValueError(f"Unknown entity type: {entity_type}")
+
+    table, id_col = table_map[entity_type]
+    conn.executemany(
+        f"INSERT INTO {table} ({id_col}, tag) VALUES (?, ?)",
+        [(entity_id, tag) for tag in tags],
+    )
+
+
+def _delete_tags(
+    conn,
+    entity_id: str,
+    entity_type: str,
+) -> None:
+    """Delete all tags for an entity.
+
+    Args:
+        conn: Database connection (within transaction).
+        entity_id: ID of the entity.
+        entity_type: One of 'lesson', 'resource', 'rule'.
+    """
+    table_map = {
+        'lesson': ('lesson_tags', 'lesson_id'),
+        'resource': ('resource_tags', 'resource_id'),
+        'rule': ('rule_tags', 'rule_id'),
+    }
+
+    if entity_type not in table_map:
+        raise ValueError(f"Unknown entity type: {entity_type}")
+
+    table, id_col = table_map[entity_type]
+    conn.execute(f"DELETE FROM {table} WHERE {id_col} = ?", (entity_id,))
+
+
+def _get_tags(
+    conn,
+    entity_id: str,
+    entity_type: str,
+) -> list[str]:
+    """Get tags for an entity.
+
+    Args:
+        conn: Database connection.
+        entity_id: ID of the entity.
+        entity_type: One of 'lesson', 'resource', 'rule'.
+
+    Returns:
+        List of tags.
+    """
+    table_map = {
+        'lesson': ('lesson_tags', 'lesson_id'),
+        'resource': ('resource_tags', 'resource_id'),
+        'rule': ('rule_tags', 'rule_id'),
+    }
+
+    if entity_type not in table_map:
+        raise ValueError(f"Unknown entity type: {entity_type}")
+
+    table, id_col = table_map[entity_type]
+    cursor = conn.execute(
+        f"SELECT tag FROM {table} WHERE {id_col} = ?",
+        (entity_id,),
+    )
+    return [row["tag"] for row in cursor.fetchall()]
+
+
+# --- Property Fetch Helpers ---
+
+
+def _fetch_lesson_properties(
+    conn,
+    lesson_id: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """Fetch tags, contexts, and anti_contexts for a lesson.
+
+    Args:
+        conn: Database connection.
+        lesson_id: The lesson ID.
+
+    Returns:
+        Tuple of (tags, contexts, anti_contexts).
+    """
+    # Get tags
+    tags = _get_tags(conn, lesson_id, 'lesson')
+
+    # Get contexts
+    cursor = conn.execute(
+        "SELECT context, applies FROM lesson_contexts WHERE lesson_id = ?",
+        (lesson_id,),
+    )
+    contexts = []
+    anti_contexts = []
+    for r in cursor.fetchall():
+        if r["applies"]:
+            contexts.append(r["context"])
+        else:
+            anti_contexts.append(r["context"])
+
+    return tags, contexts, anti_contexts
+
+
+# --- Embedding Helpers ---
+
+
+def _store_embedding(
+    conn,
+    entity_id: str,
+    entity_type: str,
+    text: str,
+    config: Config,
+) -> None:
+    """Generate and store embedding for an entity.
+
+    Args:
+        conn: Database connection (within transaction).
+        entity_id: ID of the entity.
+        entity_type: One of 'lesson', 'resource', 'chunk'.
+        text: Text to embed.
+        config: Configuration for embedding model.
+    """
+    embedding = embed_text(text, config)
+    embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
+
+    table_map = {
+        'lesson': ('lesson_embeddings', 'lesson_id'),
+        'resource': ('resource_embeddings', 'resource_id'),
+        'chunk': ('chunk_embeddings', 'chunk_id'),
+    }
+
+    if entity_type not in table_map:
+        raise ValueError(f"Unknown entity type: {entity_type}")
+
+    table, id_col = table_map[entity_type]
+    conn.execute(
+        f"INSERT INTO {table} ({id_col}, embedding) VALUES (?, ?)",
+        (entity_id, embedding_blob),
+    )
+
+
+def _delete_embedding(
+    conn,
+    entity_id: str,
+    entity_type: str,
+) -> None:
+    """Delete embedding for an entity.
+
+    Args:
+        conn: Database connection (within transaction).
+        entity_id: ID of the entity.
+        entity_type: One of 'lesson', 'resource', 'chunk'.
+    """
+    table_map = {
+        'lesson': ('lesson_embeddings', 'lesson_id'),
+        'resource': ('resource_embeddings', 'resource_id'),
+        'chunk': ('chunk_embeddings', 'chunk_id'),
+    }
+
+    if entity_type not in table_map:
+        raise ValueError(f"Unknown entity type: {entity_type}")
+
+    table, id_col = table_map[entity_type]
+    conn.execute(f"DELETE FROM {table} WHERE {id_col} = ?", (entity_id,))
+
+
 # --- CRUD Operations ---
 
 
@@ -229,10 +425,8 @@ def add_lesson(
     if tags:
         tags = _resolve_tag_aliases(tags, config)
 
-    # Generate ID and embedding
+    # Generate ID
     lesson_id = _generate_id()
-    embedding = embed_text(f"{title}\n\n{content}", config)
-    embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
 
     with get_db(config) as conn:
         # Insert lesson
@@ -245,11 +439,7 @@ def add_lesson(
         )
 
         # Insert tags
-        if tags:
-            conn.executemany(
-                "INSERT INTO lesson_tags (lesson_id, tag) VALUES (?, ?)",
-                [(lesson_id, tag) for tag in tags],
-            )
+        _save_tags(conn, lesson_id, 'lesson', tags)
 
         # Insert contexts
         if contexts:
@@ -266,14 +456,95 @@ def add_lesson(
             )
 
         # Insert embedding
-        conn.execute(
-            "INSERT INTO lesson_embeddings (lesson_id, embedding) VALUES (?, ?)",
-            (lesson_id, embedding_blob),
-        )
+        _store_embedding(conn, lesson_id, 'lesson', f"{title}\n\n{content}", config)
 
         conn.commit()
 
     return lesson_id
+
+
+@dataclass
+class LessonInput:
+    """Input data for batch lesson creation."""
+    title: str
+    content: str
+    tags: Optional[list[str]] = None
+    contexts: Optional[list[str]] = None
+    anti_contexts: Optional[list[str]] = None
+    confidence: Optional[str] = None
+    source: Optional[str] = None
+    source_notes: Optional[str] = None
+
+
+def add_lessons_batch(
+    lessons: list[LessonInput],
+    config: Optional[Config] = None,
+) -> list[str]:
+    """Add multiple lessons in a single transaction.
+
+    More efficient than calling add_lesson() multiple times when adding
+    many lessons, as it batches database operations and embedding calls.
+
+    Args:
+        lessons: List of LessonInput objects.
+        config: Configuration to use.
+
+    Returns:
+        List of generated lesson IDs in the same order as input.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    if not lessons:
+        return []
+
+    lesson_ids = []
+
+    with get_db(config) as conn:
+        for lesson in lessons:
+            # Resolve tag aliases
+            tags = lesson.tags
+            if tags:
+                tags = _resolve_tag_aliases(tags, config)
+
+            # Generate ID
+            lesson_id = _generate_id()
+            lesson_ids.append(lesson_id)
+
+            # Insert lesson
+            conn.execute(
+                """
+                INSERT INTO lessons (id, title, content, confidence, source, source_notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (lesson_id, lesson.title, lesson.content, lesson.confidence, lesson.source, lesson.source_notes),
+            )
+
+            # Insert tags
+            _save_tags(conn, lesson_id, 'lesson', tags)
+
+            # Insert contexts
+            if lesson.contexts:
+                conn.executemany(
+                    "INSERT INTO lesson_contexts (lesson_id, context, applies) VALUES (?, ?, TRUE)",
+                    [(lesson_id, ctx) for ctx in lesson.contexts],
+                )
+
+            # Insert anti-contexts
+            if lesson.anti_contexts:
+                conn.executemany(
+                    "INSERT INTO lesson_contexts (lesson_id, context, applies) VALUES (?, ?, FALSE)",
+                    [(lesson_id, ctx) for ctx in lesson.anti_contexts],
+                )
+
+            # Insert embedding
+            _store_embedding(conn, lesson_id, 'lesson', f"{lesson.title}\n\n{lesson.content}", config)
+
+        conn.commit()
+
+    return lesson_ids
 
 
 def get_lesson(lesson_id: str, config: Optional[Config] = None) -> Optional[Lesson]:
@@ -301,25 +572,8 @@ def get_lesson(lesson_id: str, config: Optional[Config] = None) -> Optional[Less
         if row is None:
             return None
 
-        # Get tags
-        cursor = conn.execute(
-            "SELECT tag FROM lesson_tags WHERE lesson_id = ?",
-            (lesson_id,),
-        )
-        tags = [r["tag"] for r in cursor.fetchall()]
-
-        # Get contexts
-        cursor = conn.execute(
-            "SELECT context, applies FROM lesson_contexts WHERE lesson_id = ?",
-            (lesson_id,),
-        )
-        contexts = []
-        anti_contexts = []
-        for r in cursor.fetchall():
-            if r["applies"]:
-                contexts.append(r["context"])
-            else:
-                anti_contexts.append(r["context"])
+        # Get tags, contexts, and anti_contexts
+        tags, contexts, anti_contexts = _fetch_lesson_properties(conn, lesson_id)
 
         return Lesson(
             id=row["id"],
@@ -408,12 +662,8 @@ def update_lesson(
 
         # Update tags if provided
         if tags is not None:
-            conn.execute("DELETE FROM lesson_tags WHERE lesson_id = ?", (lesson_id,))
-            if tags:
-                conn.executemany(
-                    "INSERT INTO lesson_tags (lesson_id, tag) VALUES (?, ?)",
-                    [(lesson_id, tag) for tag in tags],
-                )
+            _delete_tags(conn, lesson_id, 'lesson')
+            _save_tags(conn, lesson_id, 'lesson', tags)
 
         # Update contexts if provided
         if contexts is not None or anti_contexts is not None:
@@ -433,17 +683,8 @@ def update_lesson(
         if title is not None or content is not None:
             new_title = title if title is not None else existing.title
             new_content = content if content is not None else existing.content
-            embedding = embed_text(f"{new_title}\n\n{new_content}", config)
-            embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
-
-            conn.execute(
-                "DELETE FROM lesson_embeddings WHERE lesson_id = ?",
-                (lesson_id,),
-            )
-            conn.execute(
-                "INSERT INTO lesson_embeddings (lesson_id, embedding) VALUES (?, ?)",
-                (lesson_id, embedding_blob),
-            )
+            _delete_embedding(conn, lesson_id, 'lesson')
+            _store_embedding(conn, lesson_id, 'lesson', f"{new_title}\n\n{new_content}", config)
 
         conn.commit()
 
@@ -565,7 +806,7 @@ def get_related(
     ensure_initialized(config)
 
     with get_db(config) as conn:
-        # Build recursive CTE query
+        # Build recursive CTE query (only traverse lesson→lesson edges)
         relation_filter = ""
         params: list = [lesson_id, depth]
 
@@ -578,14 +819,14 @@ def get_related(
             WITH RECURSIVE related AS (
                 SELECT to_id, 1 as depth
                 FROM edges e
-                WHERE from_id = ? {relation_filter}
+                WHERE from_id = ? AND from_type = 'lesson' AND to_type = 'lesson' {relation_filter}
 
                 UNION
 
                 SELECT e.to_id, r.depth + 1
                 FROM edges e
                 JOIN related r ON e.from_id = r.to_id
-                WHERE r.depth < ? {relation_filter}
+                WHERE r.depth < ? AND e.from_type = 'lesson' AND e.to_type = 'lesson' {relation_filter}
             )
             SELECT DISTINCT to_id FROM related
         """
@@ -622,12 +863,13 @@ def link_lessons(
     with get_db(config) as conn:
         try:
             conn.execute(
-                "INSERT INTO edges (from_id, to_id, relation) VALUES (?, ?, ?)",
+                """INSERT INTO edges (from_id, from_type, to_id, to_type, relation)
+                   VALUES (?, 'lesson', ?, 'lesson', ?)""",
                 (from_id, to_id, relation),
             )
             conn.commit()
             return True
-        except Exception:
+        except sqlite3.IntegrityError:
             # Edge already exists
             return False
 
@@ -657,19 +899,23 @@ def unlink_lessons(
     with get_db(config) as conn:
         if relation:
             cursor = conn.execute(
-                "DELETE FROM edges WHERE from_id = ? AND to_id = ? AND relation = ?",
+                """DELETE FROM edges
+                   WHERE from_id = ? AND from_type = 'lesson'
+                   AND to_id = ? AND to_type = 'lesson' AND relation = ?""",
                 (from_id, to_id, relation),
             )
         else:
             cursor = conn.execute(
-                "DELETE FROM edges WHERE from_id = ? AND to_id = ?",
+                """DELETE FROM edges
+                   WHERE from_id = ? AND from_type = 'lesson'
+                   AND to_id = ? AND to_type = 'lesson'""",
                 (from_id, to_id),
             )
         conn.commit()
         return cursor.rowcount
 
 
-# --- Lesson-Resource Linking (v6) ---
+# --- Lesson-Resource Linking (v6, updated to use edges in v9) ---
 
 
 def link_lesson_to_resource(
@@ -697,12 +943,13 @@ def link_lesson_to_resource(
     with get_db(config) as conn:
         try:
             conn.execute(
-                "INSERT INTO lesson_links (lesson_id, resource_id, relation) VALUES (?, ?, ?)",
+                """INSERT INTO edges (from_id, from_type, to_id, to_type, relation)
+                   VALUES (?, 'lesson', ?, 'resource', ?)""",
                 (lesson_id, resource_id, relation),
             )
             conn.commit()
             return True
-        except Exception:
+        except sqlite3.IntegrityError:
             # Link already exists
             return False
 
@@ -729,7 +976,9 @@ def unlink_lesson_from_resource(
 
     with get_db(config) as conn:
         cursor = conn.execute(
-            "DELETE FROM lesson_links WHERE lesson_id = ? AND resource_id = ?",
+            """DELETE FROM edges
+               WHERE from_id = ? AND from_type = 'lesson'
+               AND to_id = ? AND to_type = 'resource'""",
             (lesson_id, resource_id),
         )
         conn.commit()
@@ -766,9 +1015,9 @@ def get_lesson_resource_links(
     with get_db(config) as conn:
         cursor = conn.execute(
             """
-            SELECT lesson_id, resource_id, relation, created_at
-            FROM lesson_links
-            WHERE lesson_id = ?
+            SELECT from_id AS lesson_id, to_id AS resource_id, relation, created_at
+            FROM edges
+            WHERE from_id = ? AND from_type = 'lesson' AND to_type = 'resource'
             """,
             (lesson_id,),
         )
@@ -804,9 +1053,9 @@ def get_lessons_for_resource(
     with get_db(config) as conn:
         cursor = conn.execute(
             """
-            SELECT lesson_id, resource_id, relation, created_at
-            FROM lesson_links
-            WHERE resource_id = ?
+            SELECT from_id AS lesson_id, to_id AS resource_id, relation, created_at
+            FROM edges
+            WHERE to_id = ? AND from_type = 'lesson' AND to_type = 'resource'
             """,
             (resource_id,),
         )
@@ -939,7 +1188,8 @@ def add_source(
             )
             conn.commit()
             return True
-        except Exception:
+        except sqlite3.IntegrityError:
+            # Source type already exists
             return False
 
 
@@ -987,9 +1237,6 @@ def merge_tags(
 
 def _get_git_ref(path: str) -> Optional[str]:
     """Get the current git commit ref for a file path."""
-    import subprocess
-    from pathlib import Path
-
     try:
         # Check if path is in a git repo
         result = subprocess.run(
@@ -1000,7 +1247,8 @@ def _get_git_ref(path: str) -> Optional[str]:
         )
         if result.returncode == 0:
             return result.stdout.strip()[:12]  # Short hash
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
+        # Git not available or subprocess error
         pass
     return None
 
@@ -1082,13 +1330,7 @@ def _store_chunks(
         embed_text_parts.append(chunk.content)
         embed_input = "\n\n".join(embed_text_parts)
 
-        embedding = embed_text(embed_input, config)
-        embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
-
-        conn.execute(
-            "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
-            (chunk_id, embedding_blob),
-        )
+        _store_embedding(conn, chunk_id, 'chunk', embed_input, config)
 
     return stored_chunks
 
@@ -1123,7 +1365,7 @@ def _store_and_resolve_links(
     path: str,
     stored_chunks: list[tuple[str, "Chunk"]],
 ) -> int:
-    """Extract links from content and store them with resolution attempts.
+    """Extract links from content and store them as edges with anchor metadata.
 
     Args:
         conn: Database connection.
@@ -1155,25 +1397,38 @@ def _store_and_resolve_links(
         if from_chunk_id and from_chunk_id == resolved_chunk_id:
             continue
 
-        # Store link
-        conn.execute(
-            """
-            INSERT INTO resource_links
-            (from_resource_id, from_chunk_id, to_path, to_fragment, link_text,
-             resolved_resource_id, resolved_chunk_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                resource_id,
-                from_chunk_id,
-                link.absolute_path,
-                link.fragment,
-                link.link_text,
-                resolved_resource_id,
-                resolved_chunk_id,
-            ),
-        )
-        count += 1
+        # Only create edge if we resolved the target
+        if resolved_resource_id:
+            # Determine from entity
+            from_id = from_chunk_id if from_chunk_id else resource_id
+            from_type = "chunk" if from_chunk_id else "resource"
+
+            # Determine to entity
+            to_id = resolved_chunk_id if resolved_chunk_id else resolved_resource_id
+            to_type = "chunk" if resolved_chunk_id else "resource"
+
+            # Insert edge
+            conn.execute(
+                """INSERT OR IGNORE INTO edges (from_id, from_type, to_id, to_type, relation)
+                   VALUES (?, ?, ?, ?, 'references')""",
+                (from_id, from_type, to_id, to_type),
+            )
+
+            # Get edge ID for anchor
+            cursor = conn.execute(
+                """SELECT id FROM edges
+                   WHERE from_id = ? AND from_type = ? AND to_id = ? AND to_type = ? AND relation = 'references'""",
+                (from_id, from_type, to_id, to_type),
+            )
+            edge_row = cursor.fetchone()
+
+            if edge_row:
+                conn.execute(
+                    """INSERT INTO resource_anchors (edge_id, to_path, to_fragment, link_text)
+                       VALUES (?, ?, ?, ?)""",
+                    (edge_row["id"], link.absolute_path, link.fragment, link.link_text),
+                )
+                count += 1
 
     return count
 
@@ -1185,42 +1440,21 @@ def _resolve_dangling_links(
 ) -> int:
     """Find and resolve links pointing to this newly imported resource.
 
+    Note: With schema v9, unresolved links are not stored (only resolved links
+    create edges). To resolve previously dangling links, re-import the source
+    resources.
+
     Args:
         conn: Database connection.
         new_resource_path: Path of the newly imported resource.
         new_resource_id: ID of the newly imported resource.
 
     Returns:
-        Number of links resolved.
+        Number of links resolved (always 0 in v9+).
     """
-    cursor = conn.execute(
-        """
-        SELECT id, from_resource_id, to_fragment
-        FROM resource_links
-        WHERE to_path = ? AND resolved_resource_id IS NULL
-        """,
-        (new_resource_path,),
-    )
-
-    count = 0
-    for row in cursor.fetchall():
-        resolved_chunk_id = None
-        if row["to_fragment"]:
-            resolved_chunk_id = resolve_fragment_to_chunk(
-                conn, new_resource_id, row["to_fragment"]
-            )
-
-        conn.execute(
-            """
-            UPDATE resource_links
-            SET resolved_resource_id = ?, resolved_chunk_id = ?
-            WHERE id = ?
-            """,
-            (new_resource_id, resolved_chunk_id, row["id"]),
-        )
-        count += 1
-
-    return count
+    # v9: Dangling links are not stored, so there's nothing to resolve.
+    # Re-import source resources to create edges for newly resolvable links.
+    return 0
 
 
 def get_resource_by_path(
@@ -1330,10 +1564,6 @@ def add_resource(
     content_hash = _compute_content_hash(content)
     source_ref = _get_git_ref(path) if path else None
 
-    # Generate embedding for the whole resource
-    embedding = embed_text(f"{title}\n\n{content}", config)
-    embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
-
     with get_db(config) as conn:
         # Insert resource
         conn.execute(
@@ -1351,17 +1581,10 @@ def add_resource(
         )
 
         # Insert tags
-        if tags:
-            conn.executemany(
-                "INSERT INTO resource_tags (resource_id, tag) VALUES (?, ?)",
-                [(resource_id, tag) for tag in tags],
-            )
+        _save_tags(conn, resource_id, 'resource', tags)
 
         # Insert embedding
-        conn.execute(
-            "INSERT INTO resource_embeddings (resource_id, embedding) VALUES (?, ?)",
-            (resource_id, embedding_blob),
-        )
+        _store_embedding(conn, resource_id, 'resource', f"{title}\n\n{content}", config)
 
         # Chunk and store chunks for docs
         stored_chunks = []
@@ -1419,10 +1642,6 @@ def _reimport_resource(
     content_hash = _compute_content_hash(content)
     source_ref = _get_git_ref(path) if path else None
 
-    # Generate new embedding
-    embedding = embed_text(f"{title}\n\n{content}", config)
-    embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
-
     with get_db(config) as conn:
         # Delete old chunks (cascades to chunk_embeddings via FK - but vec0 doesn't support FK)
         # First get chunk IDs to delete embeddings
@@ -1436,8 +1655,8 @@ def _reimport_resource(
 
         conn.execute("DELETE FROM resource_chunks WHERE resource_id = ?", (existing_id,))
 
-        # Delete old links from this resource (keep links TO this resource)
-        conn.execute("DELETE FROM resource_links WHERE from_resource_id = ?", (existing_id,))
+        # Delete old edges FROM this resource (keep edges TO this resource)
+        conn.execute("DELETE FROM edges WHERE from_id = ? AND from_type = 'resource' AND relation = 'references'", (existing_id,))
 
         # Update resource metadata
         conn.execute(
@@ -1458,19 +1677,12 @@ def _reimport_resource(
         )
 
         # Update tags
-        conn.execute("DELETE FROM resource_tags WHERE resource_id = ?", (existing_id,))
-        if tags:
-            conn.executemany(
-                "INSERT INTO resource_tags (resource_id, tag) VALUES (?, ?)",
-                [(existing_id, tag) for tag in tags],
-            )
+        _delete_tags(conn, existing_id, 'resource')
+        _save_tags(conn, existing_id, 'resource', tags)
 
         # Update embedding
-        conn.execute("DELETE FROM resource_embeddings WHERE resource_id = ?", (existing_id,))
-        conn.execute(
-            "INSERT INTO resource_embeddings (resource_id, embedding) VALUES (?, ?)",
-            (existing_id, embedding_blob),
-        )
+        _delete_embedding(conn, existing_id, 'resource')
+        _store_embedding(conn, existing_id, 'resource', f"{title}\n\n{content}", config)
 
         # Re-chunk and store
         stored_chunks = []
@@ -1481,25 +1693,28 @@ def _reimport_resource(
         if type == 'doc' and path:
             _store_and_resolve_links(conn, existing_id, content, path, stored_chunks)
 
-        # Re-resolve links TO this resource (fragments may have changed)
+        # Re-resolve edges pointing TO this resource (chunks may have changed)
+        # Find edges where to_id is this resource, then check anchors for fragments
         cursor = conn.execute(
             """
-            SELECT id, to_fragment
-            FROM resource_links
-            WHERE resolved_resource_id = ?
+            SELECT e.id AS edge_id, ra.to_fragment
+            FROM edges e
+            JOIN resource_anchors ra ON e.id = ra.edge_id
+            WHERE e.to_id = ? AND e.to_type = 'resource'
             """,
             (existing_id,),
         )
         for row in cursor.fetchall():
-            resolved_chunk_id = None
             if row["to_fragment"]:
                 resolved_chunk_id = resolve_fragment_to_chunk(
                     conn, existing_id, row["to_fragment"]
                 )
-            conn.execute(
-                "UPDATE resource_links SET resolved_chunk_id = ? WHERE id = ?",
-                (resolved_chunk_id, row["id"]),
-            )
+                if resolved_chunk_id:
+                    # Update edge to point to chunk instead of resource
+                    conn.execute(
+                        "UPDATE edges SET to_id = ?, to_type = 'chunk' WHERE id = ?",
+                        (resolved_chunk_id, row["edge_id"]),
+                    )
 
         conn.commit()
 
@@ -1969,11 +2184,7 @@ def suggest_rule(
         )
 
         # Insert tags
-        if tags:
-            conn.executemany(
-                "INSERT INTO rule_tags (rule_id, tag) VALUES (?, ?)",
-                [(rule_id, tag) for tag in tags],
-            )
+        _save_tags(conn, rule_id, 'rule', tags)
 
         # Insert links to lessons
         if linked_lessons:
@@ -2170,8 +2381,112 @@ def link_to_rule(
             )
             conn.commit()
             return True
-        except Exception:
+        except sqlite3.IntegrityError:
+            # Link already exists
             return False
+
+
+def unlink_from_rule(
+    rule_id: str,
+    target_id: str,
+    target_type: Optional[str] = None,
+    config: Optional[Config] = None,
+) -> int:
+    """Remove a link from a rule.
+
+    Args:
+        rule_id: The rule ID.
+        target_id: The lesson or resource ID to unlink.
+        target_type: Optional filter by 'lesson' or 'resource'.
+        config: Configuration to use.
+
+    Returns:
+        Number of links removed.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        if target_type:
+            cursor = conn.execute(
+                "DELETE FROM rule_links WHERE rule_id = ? AND target_id = ? AND target_type = ?",
+                (rule_id, target_id, target_type),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM rule_links WHERE rule_id = ? AND target_id = ?",
+                (rule_id, target_id),
+            )
+        conn.commit()
+        return cursor.rowcount
+
+
+def update_rule(
+    rule_id: str,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    rationale: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    config: Optional[Config] = None,
+) -> bool:
+    """Update an existing rule.
+
+    Args:
+        rule_id: The rule ID to update.
+        title: New title (optional).
+        content: New content (optional).
+        rationale: New rationale (optional).
+        tags: New tags (replaces existing).
+        config: Configuration to use.
+
+    Returns:
+        True if rule was updated, False if not found.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Check if rule exists
+    existing = get_rule(rule_id, config)
+    if existing is None:
+        return False
+
+    # Resolve tag aliases
+    if tags is not None:
+        tags = _resolve_tag_aliases(tags, config)
+
+    with get_db(config) as conn:
+        # Build update query
+        updates = []
+        params = []
+
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+        if rationale is not None:
+            updates.append("rationale = ?")
+            params.append(rationale)
+
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            query = f"UPDATE rules SET {', '.join(updates)} WHERE id = ?"
+            params.append(rule_id)
+            conn.execute(query, params)
+
+        # Update tags if provided
+        if tags is not None:
+            _delete_tags(conn, rule_id, 'rule')
+            _save_tags(conn, rule_id, 'rule', tags)
+
+        conn.commit()
+
+    return True
 
 
 # --- Resource Link Operations (v3) ---
@@ -2196,11 +2511,24 @@ def get_chunk_links(
     ensure_initialized(config)
 
     with get_db(config) as conn:
+        # Find the parent resource for this chunk
+        chunk_cursor = conn.execute(
+            "SELECT resource_id FROM resource_chunks WHERE id = ?",
+            (chunk_id,),
+        )
+        chunk_row = chunk_cursor.fetchone()
+        if not chunk_row:
+            return []
+        resource_id = chunk_row["resource_id"]
+
         cursor = conn.execute(
             """
-            SELECT * FROM resource_links
-            WHERE from_chunk_id = ?
-            ORDER BY id
+            SELECT e.id, e.from_id, e.from_type, e.to_id, e.to_type,
+                   ra.to_path, ra.to_fragment, ra.link_text
+            FROM edges e
+            JOIN resource_anchors ra ON e.id = ra.edge_id
+            WHERE e.from_id = ? AND e.from_type = 'chunk'
+            ORDER BY e.id
             """,
             (chunk_id,),
         )
@@ -2208,13 +2536,13 @@ def get_chunk_links(
         return [
             ResourceLink(
                 id=row["id"],
-                from_resource_id=row["from_resource_id"],
-                from_chunk_id=row["from_chunk_id"],
+                from_resource_id=resource_id,
+                from_chunk_id=chunk_id,
                 to_path=row["to_path"],
                 to_fragment=row["to_fragment"],
                 link_text=row["link_text"],
-                resolved_resource_id=row["resolved_resource_id"],
-                resolved_chunk_id=row["resolved_chunk_id"],
+                resolved_resource_id=row["to_id"] if row["to_type"] == 'resource' else None,
+                resolved_chunk_id=row["to_id"] if row["to_type"] == 'chunk' else None,
             )
             for row in cursor.fetchall()
         ]
@@ -2224,7 +2552,7 @@ def get_resource_links(
     resource_id: str,
     config: Optional[Config] = None,
 ) -> list[ResourceLink]:
-    """Get all links from a resource.
+    """Get all links from a resource (including from its chunks).
 
     Args:
         resource_id: The resource ID.
@@ -2239,25 +2567,51 @@ def get_resource_links(
     ensure_initialized(config)
 
     with get_db(config) as conn:
-        cursor = conn.execute(
-            """
-            SELECT * FROM resource_links
-            WHERE from_resource_id = ?
-            ORDER BY id
-            """,
+        # Get chunk IDs for this resource
+        chunk_cursor = conn.execute(
+            "SELECT id FROM resource_chunks WHERE resource_id = ?",
             (resource_id,),
         )
+        chunk_ids = [row["id"] for row in chunk_cursor.fetchall()]
+
+        # Query edges from this resource or its chunks
+        if chunk_ids:
+            placeholders = ",".join("?" * len(chunk_ids))
+            cursor = conn.execute(
+                f"""
+                SELECT e.id, e.from_id, e.from_type, e.to_id, e.to_type,
+                       ra.to_path, ra.to_fragment, ra.link_text
+                FROM edges e
+                JOIN resource_anchors ra ON e.id = ra.edge_id
+                WHERE (e.from_id = ? AND e.from_type = 'resource')
+                   OR (e.from_id IN ({placeholders}) AND e.from_type = 'chunk')
+                ORDER BY e.id
+                """,
+                [resource_id] + chunk_ids,
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT e.id, e.from_id, e.from_type, e.to_id, e.to_type,
+                       ra.to_path, ra.to_fragment, ra.link_text
+                FROM edges e
+                JOIN resource_anchors ra ON e.id = ra.edge_id
+                WHERE e.from_id = ? AND e.from_type = 'resource'
+                ORDER BY e.id
+                """,
+                (resource_id,),
+            )
 
         return [
             ResourceLink(
                 id=row["id"],
-                from_resource_id=row["from_resource_id"],
-                from_chunk_id=row["from_chunk_id"],
+                from_resource_id=resource_id,
+                from_chunk_id=row["from_id"] if row["from_type"] == 'chunk' else None,
                 to_path=row["to_path"],
                 to_fragment=row["to_fragment"],
                 link_text=row["link_text"],
-                resolved_resource_id=row["resolved_resource_id"],
-                resolved_chunk_id=row["resolved_chunk_id"],
+                resolved_resource_id=row["to_id"] if row["to_type"] == 'resource' else None,
+                resolved_chunk_id=row["to_id"] if row["to_type"] == 'chunk' else None,
             )
             for row in cursor.fetchall()
         ]
@@ -2281,52 +2635,70 @@ def get_related_resources(
 
     ensure_initialized(config)
 
-    with get_db(config) as conn:
-        # Outgoing links (from this resource)
-        cursor = conn.execute(
-            """
-            SELECT * FROM resource_links
-            WHERE from_resource_id = ?
-            ORDER BY id
-            """,
-            (resource_id,),
-        )
-        outgoing = [
-            ResourceLink(
-                id=row["id"],
-                from_resource_id=row["from_resource_id"],
-                from_chunk_id=row["from_chunk_id"],
-                to_path=row["to_path"],
-                to_fragment=row["to_fragment"],
-                link_text=row["link_text"],
-                resolved_resource_id=row["resolved_resource_id"],
-                resolved_chunk_id=row["resolved_chunk_id"],
-            )
-            for row in cursor.fetchall()
-        ]
+    # Use get_resource_links for outgoing
+    outgoing = get_resource_links(resource_id, config)
 
-        # Incoming links (to this resource)
-        cursor = conn.execute(
-            """
-            SELECT * FROM resource_links
-            WHERE resolved_resource_id = ?
-            ORDER BY id
-            """,
+    with get_db(config) as conn:
+        # Get chunk IDs for this resource (for incoming links to chunks)
+        chunk_cursor = conn.execute(
+            "SELECT id FROM resource_chunks WHERE resource_id = ?",
             (resource_id,),
         )
-        incoming = [
-            ResourceLink(
+        chunk_ids = [row["id"] for row in chunk_cursor.fetchall()]
+
+        # Incoming links (to this resource or its chunks)
+        if chunk_ids:
+            placeholders = ",".join("?" * len(chunk_ids))
+            cursor = conn.execute(
+                f"""
+                SELECT e.id, e.from_id, e.from_type, e.to_id, e.to_type,
+                       ra.to_path, ra.to_fragment, ra.link_text
+                FROM edges e
+                JOIN resource_anchors ra ON e.id = ra.edge_id
+                WHERE (e.to_id = ? AND e.to_type = 'resource')
+                   OR (e.to_id IN ({placeholders}) AND e.to_type = 'chunk')
+                ORDER BY e.id
+                """,
+                [resource_id] + chunk_ids,
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT e.id, e.from_id, e.from_type, e.to_id, e.to_type,
+                       ra.to_path, ra.to_fragment, ra.link_text
+                FROM edges e
+                JOIN resource_anchors ra ON e.id = ra.edge_id
+                WHERE e.to_id = ? AND e.to_type = 'resource'
+                ORDER BY e.id
+                """,
+                (resource_id,),
+            )
+
+        incoming = []
+        for row in cursor.fetchall():
+            # For incoming, we need to look up the from_resource_id
+            from_resource_id = row["from_id"]
+            from_chunk_id = None
+            if row["from_type"] == "chunk":
+                from_chunk_id = row["from_id"]
+                # Look up parent resource
+                r_cursor = conn.execute(
+                    "SELECT resource_id FROM resource_chunks WHERE id = ?",
+                    (from_chunk_id,),
+                )
+                r_row = r_cursor.fetchone()
+                from_resource_id = r_row["resource_id"] if r_row else row["from_id"]
+
+            incoming.append(ResourceLink(
                 id=row["id"],
-                from_resource_id=row["from_resource_id"],
-                from_chunk_id=row["from_chunk_id"],
+                from_resource_id=from_resource_id,
+                from_chunk_id=from_chunk_id,
                 to_path=row["to_path"],
                 to_fragment=row["to_fragment"],
                 link_text=row["link_text"],
-                resolved_resource_id=row["resolved_resource_id"],
-                resolved_chunk_id=row["resolved_chunk_id"],
-            )
-            for row in cursor.fetchall()
-        ]
+                resolved_resource_id=resource_id,
+                resolved_chunk_id=row["to_id"] if row["to_type"] == 'chunk' else None,
+            ))
 
         return outgoing, incoming
 
@@ -2337,7 +2709,7 @@ def update_resource_paths(
     dry_run: bool = False,
     config: Optional[Config] = None,
 ) -> dict[str, int]:
-    """Update paths for resources and links after files move.
+    """Update paths for resources and link anchors after files move.
 
     Args:
         from_prefix: Old path prefix to replace.
@@ -2346,14 +2718,17 @@ def update_resource_paths(
         config: Configuration to use.
 
     Returns:
-        Dict with counts: {'resources': N, 'links': N, 'newly_resolved': N}
+        Dict with counts: {'resources': N, 'anchors': N}
+
+    Note: With v9 schema, all stored anchors are already resolved.
+          To create edges for previously unresolved links, re-import the source resources.
     """
     if config is None:
         config = get_config()
 
     ensure_initialized(config)
 
-    counts = {"resources": 0, "links": 0, "newly_resolved": 0}
+    counts = {"resources": 0, "anchors": 0}
 
     with get_db(config) as conn:
         # Find resources with paths matching the prefix
@@ -2369,18 +2744,18 @@ def update_resource_paths(
 
         counts["resources"] = len(resources_to_update)
 
-        # Find links with to_path matching the prefix
+        # Find anchors with to_path matching the prefix
         cursor = conn.execute(
-            "SELECT id, to_path, to_fragment FROM resource_links WHERE to_path LIKE ?",
+            "SELECT id, to_path FROM resource_anchors WHERE to_path LIKE ?",
             (f"{from_prefix}%",),
         )
-        links_to_update = []
+        anchors_to_update = []
         for row in cursor.fetchall():
             old_path = row["to_path"]
             new_path = to_prefix + old_path[len(from_prefix):]
-            links_to_update.append((row["id"], old_path, new_path, row["to_fragment"]))
+            anchors_to_update.append((row["id"], new_path))
 
-        counts["links"] = len(links_to_update)
+        counts["anchors"] = len(anchors_to_update)
 
         if not dry_run:
             # Update resource paths
@@ -2390,35 +2765,11 @@ def update_resource_paths(
                     (new_path, resource_id),
                 )
 
-            # Update link paths and attempt resolution
-            for link_id, old_path, new_path, fragment in links_to_update:
-                # Try to resolve the link with the new path
-                resolved_resource_id = resolve_link_to_resource(conn, new_path)
-                resolved_chunk_id = None
-
-                if resolved_resource_id and fragment:
-                    resolved_chunk_id = resolve_fragment_to_chunk(
-                        conn, resolved_resource_id, fragment
-                    )
-
-                # Check if this link was previously unresolved
-                cursor = conn.execute(
-                    "SELECT resolved_resource_id FROM resource_links WHERE id = ?",
-                    (link_id,),
-                )
-                row = cursor.fetchone()
-                was_unresolved = row and row["resolved_resource_id"] is None
-
-                if was_unresolved and resolved_resource_id:
-                    counts["newly_resolved"] += 1
-
+            # Update anchor paths
+            for anchor_id, new_path in anchors_to_update:
                 conn.execute(
-                    """
-                    UPDATE resource_links
-                    SET to_path = ?, resolved_resource_id = ?, resolved_chunk_id = ?
-                    WHERE id = ?
-                    """,
-                    (new_path, resolved_resource_id, resolved_chunk_id, link_id),
+                    "UPDATE resource_anchors SET to_path = ? WHERE id = ?",
+                    (new_path, anchor_id),
                 )
 
             conn.commit()

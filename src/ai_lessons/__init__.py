@@ -1,5 +1,7 @@
 """AI Lessons - Knowledge management system with semantic search and graph relationships."""
 
+from __future__ import annotations
+
 from importlib.metadata import version, PackageNotFoundError
 
 _pkg = __package__.split('.')[0]

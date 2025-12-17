@@ -1,6 +1,8 @@
 """Database schema definitions for ai-lessons."""
 
-SCHEMA_VERSION = 8
+from __future__ import annotations
+
+SCHEMA_VERSION = 9
 
 # Schema creation SQL
 SCHEMA_SQL = """
@@ -49,13 +51,16 @@ CREATE TABLE IF NOT EXISTS lesson_contexts (
     PRIMARY KEY (lesson_id, context, applies)
 );
 
--- Graph edges between lessons
+-- v9: Unified graph edges (lesson→lesson, lesson→resource, resource→resource, chunk→chunk, etc.)
 CREATE TABLE IF NOT EXISTS edges (
-    from_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    to_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id TEXT NOT NULL,
+    from_type TEXT NOT NULL CHECK (from_type IN ('lesson', 'resource', 'chunk')),
+    to_id TEXT NOT NULL,
+    to_type TEXT NOT NULL CHECK (to_type IN ('lesson', 'resource', 'chunk')),
     relation TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (from_id, to_id, relation)
+    UNIQUE(from_id, from_type, to_id, to_type, relation)
 );
 
 -- Tag relationships (aliases, hierarchy)
@@ -71,8 +76,9 @@ CREATE INDEX IF NOT EXISTS idx_lesson_tags_tag ON lesson_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_lesson_tags_lesson ON lesson_tags(lesson_id);
 CREATE INDEX IF NOT EXISTS idx_lesson_contexts_context ON lesson_contexts(context);
 CREATE INDEX IF NOT EXISTS idx_lesson_contexts_lesson ON lesson_contexts(lesson_id);
-CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
-CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
+CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id, from_type);
+CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id, to_type);
+CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation);
 CREATE INDEX IF NOT EXISTS idx_lessons_created ON lessons(created_at);
 CREATE INDEX IF NOT EXISTS idx_lessons_updated ON lessons(updated_at);
 CREATE INDEX IF NOT EXISTS idx_lessons_confidence ON lessons(confidence);
@@ -154,18 +160,7 @@ CREATE TABLE IF NOT EXISTS rule_links (
     PRIMARY KEY (rule_id, target_id)
 );
 
--- v6: Lesson links (to resources)
-CREATE TABLE IF NOT EXISTS lesson_links (
-    lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
-    relation TEXT NOT NULL DEFAULT 'related_to',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (lesson_id, resource_id)
-);
-
--- v6: Indexes for lesson_links
-CREATE INDEX IF NOT EXISTS idx_lesson_links_lesson ON lesson_links(lesson_id);
-CREATE INDEX IF NOT EXISTS idx_lesson_links_resource ON lesson_links(resource_id);
+-- v6: lesson_links table removed in v9, merged into edges
 
 -- v7: Search feedback for quality monitoring
 -- v8: Added version column
@@ -182,22 +177,19 @@ CREATE TABLE IF NOT EXISTS search_feedback (
 -- v7: Indexes for search_feedback
 CREATE INDEX IF NOT EXISTS idx_search_feedback_created ON search_feedback(created_at);
 
--- v5: Resource links (extracted markdown links)
-CREATE TABLE IF NOT EXISTS resource_links (
+-- v9: Resource anchors (markdown link metadata for edges)
+-- Stores anchor-specific metadata for resource→resource and chunk→chunk edges
+CREATE TABLE IF NOT EXISTS resource_anchors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
-    from_chunk_id TEXT REFERENCES resource_chunks(id) ON DELETE CASCADE,
-    to_path TEXT NOT NULL,                  -- Absolute path of linked file
-    to_fragment TEXT,                       -- Fragment/anchor without # (nullable)
-    link_text TEXT,                         -- The display text from [text](path)
-    resolved_resource_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
-    resolved_chunk_id TEXT REFERENCES resource_chunks(id) ON DELETE SET NULL
+    edge_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+    to_path TEXT NOT NULL,                  -- Original markdown path before resolution
+    to_fragment TEXT,                       -- Fragment/anchor without #
+    link_text TEXT                          -- Display text from [text](path)
 );
 
--- v5: Indexes for resource_links
-CREATE INDEX IF NOT EXISTS idx_resource_links_to_path ON resource_links(to_path);
-CREATE INDEX IF NOT EXISTS idx_resource_links_from_resource ON resource_links(from_resource_id);
-CREATE INDEX IF NOT EXISTS idx_resource_links_resolved ON resource_links(resolved_resource_id);
+-- v9: Indexes for resource_anchors
+CREATE INDEX IF NOT EXISTS idx_resource_anchors_edge ON resource_anchors(edge_id);
+CREATE INDEX IF NOT EXISTS idx_resource_anchors_path ON resource_anchors(to_path);
 
 -- v2: Indexes for resources
 CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type);

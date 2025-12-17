@@ -1,5 +1,7 @@
 """Search functionality for ai-lessons."""
 
+from __future__ import annotations
+
 import math
 import re
 import sqlite3
@@ -11,49 +13,266 @@ from .db import get_db
 from .embeddings import embed_text
 
 
+from dataclasses import field
+
+
+# --- Scoring Constants ---
+
+# Keyword scoring weights
+KEYWORD_TITLE_WEIGHT = 3.0
+KEYWORD_CONTENT_WEIGHT = 1.0
+KEYWORD_TAG_WEIGHT = 2.5
+
+# Semantic scoring sigmoid parameters
+SIGMOID_STEEPNESS = 6.0
+SIGMOID_CENTER = 1.15
+
+# Hybrid search weights
+HYBRID_SEMANTIC_WEIGHT = 0.85
+HYBRID_KEYWORD_WEIGHT = 0.15
+
+# Link boosting parameters
+LINK_BOOST_FACTOR = 0.25
+MIN_LINKED_SCORE = 0.65
+MATCH_BONUS = 0.1
+
+# Chunk scoring
+CHUNK_SPECIFICITY_MULT = 1.03
+
+# Rule default score
+RULE_DEFAULT_SCORE = 0.5
+
+
 @dataclass
 class SearchResult:
-    """A search result with score and metadata."""
+    """Base class for all search results."""
     id: str
     title: str
     content: str
     score: float
-    result_type: str = "lesson"  # 'lesson', 'resource', 'rule', 'chunk'
+    result_type: str
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LessonResult(SearchResult):
+    """Search result for a lesson."""
     confidence: Optional[str] = None
     source: Optional[str] = None
     source_notes: Optional[str] = None
-    tags: list[str] = None
-    contexts: list[str] = None
-    anti_contexts: list[str] = None
-    # Resource-specific fields
-    resource_type: Optional[str] = None  # 'doc' or 'script'
-    versions: list[str] = None
-    path: Optional[str] = None
-    # Rule-specific fields
-    rationale: Optional[str] = None
-    approved: Optional[bool] = None
-    # Chunk-specific fields (v3)
-    chunk_id: Optional[str] = None
-    chunk_index: Optional[int] = None
-    chunk_breadcrumb: Optional[str] = None
-    resource_id: Optional[str] = None  # Parent resource ID for chunks
-    resource_title: Optional[str] = None  # Parent resource title for chunks
-    # Summary field (v4) - LLM-generated summary for chunks
-    summary: Optional[str] = None
-    # Sections field (v5) - Headers within this chunk
-    sections: list[str] = None
+    contexts: list[str] = field(default_factory=list)
+    anti_contexts: list[str] = field(default_factory=list)
 
     def __post_init__(self):
-        if self.tags is None:
-            self.tags = []
-        if self.contexts is None:
-            self.contexts = []
-        if self.anti_contexts is None:
-            self.anti_contexts = []
-        if self.versions is None:
-            self.versions = []
-        if self.sections is None:
-            self.sections = []
+        self.result_type = "lesson"
+
+
+@dataclass
+class ResourceResult(SearchResult):
+    """Search result for a resource (doc or script)."""
+    resource_type: Optional[str] = None  # 'doc' or 'script'
+    versions: list[str] = field(default_factory=list)
+    path: Optional[str] = None
+
+    def __post_init__(self):
+        self.result_type = "resource"
+
+
+@dataclass
+class ChunkResult(SearchResult):
+    """Search result for a document chunk."""
+    chunk_index: Optional[int] = None
+    breadcrumb: Optional[str] = None
+    resource_id: Optional[str] = None
+    resource_title: Optional[str] = None
+    versions: list[str] = field(default_factory=list)
+    summary: Optional[str] = None
+    sections: list[str] = field(default_factory=list)
+    # Parent resource metadata
+    resource_type: Optional[str] = None  # 'doc' or 'script'
+    path: Optional[str] = None
+
+    def __post_init__(self):
+        self.result_type = "chunk"
+
+
+@dataclass
+class RuleResult(SearchResult):
+    """Search result for a rule."""
+    rationale: Optional[str] = None
+    approved: Optional[bool] = None
+
+    def __post_init__(self):
+        self.result_type = "rule"
+
+
+# --- Helper Functions ---
+
+
+def _fetch_lesson_properties(
+    conn: sqlite3.Connection,
+    lesson_id: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """Fetch tags, contexts, and anti_contexts for a lesson.
+
+    Args:
+        conn: Database connection.
+        lesson_id: The lesson ID.
+
+    Returns:
+        Tuple of (tags, contexts, anti_contexts).
+    """
+    # Get tags
+    cursor = conn.execute(
+        "SELECT tag FROM lesson_tags WHERE lesson_id = ?",
+        (lesson_id,),
+    )
+    tags = [r["tag"] for r in cursor.fetchall()]
+
+    # Get contexts
+    cursor = conn.execute(
+        "SELECT context, applies FROM lesson_contexts WHERE lesson_id = ?",
+        (lesson_id,),
+    )
+    contexts = []
+    anti_contexts = []
+    for r in cursor.fetchall():
+        if r["applies"]:
+            contexts.append(r["context"])
+        else:
+            anti_contexts.append(r["context"])
+
+    return tags, contexts, anti_contexts
+
+
+def _build_lesson_filter_clauses(
+    tag_filter: Optional[list[str]] = None,
+    context_filter: Optional[list[str]] = None,
+    confidence_min: Optional[str] = None,
+    source: Optional[str] = None,
+) -> tuple[list[str], list]:
+    """Build SQL WHERE clauses for lesson filtering.
+
+    Args:
+        tag_filter: Filter by tags (ANY match).
+        context_filter: Filter by contexts.
+        confidence_min: Minimum confidence level.
+        source: Filter by source type.
+
+    Returns:
+        Tuple of (list of SQL clause strings, list of parameters).
+        Clauses do NOT include "WHERE" or "AND" prefix.
+    """
+    clauses = []
+    params: list = []
+
+    if tag_filter:
+        placeholders = ",".join("?" * len(tag_filter))
+        clauses.append(f"""
+            l.id IN (
+                SELECT lesson_id FROM lesson_tags
+                WHERE tag IN ({placeholders})
+            )
+        """)
+        params.extend(tag_filter)
+
+    if context_filter:
+        placeholders = ",".join("?" * len(context_filter))
+        clauses.append(f"""
+            l.id IN (
+                SELECT lesson_id FROM lesson_contexts
+                WHERE context IN ({placeholders}) AND applies = TRUE
+            )
+        """)
+        params.extend(context_filter)
+
+    if confidence_min:
+        clauses.append("""
+            l.confidence IN (
+                SELECT name FROM confidence_levels
+                WHERE ordinal >= (SELECT ordinal FROM confidence_levels WHERE name = ?)
+            )
+        """)
+        params.append(confidence_min)
+
+    if source:
+        clauses.append("l.source = ?")
+        params.append(source)
+
+    return clauses, params
+
+
+def _build_resource_filter_clauses(
+    tag_filter: Optional[list[str]] = None,
+    resource_type: Optional[str] = None,
+    versions: Optional[list[str]] = None,
+) -> tuple[list[str], list]:
+    """Build SQL WHERE clauses for resource filtering.
+
+    Args:
+        tag_filter: Filter by tags (ANY match).
+        resource_type: Filter by type ('doc' or 'script').
+        versions: Filter by versions.
+
+    Returns:
+        Tuple of (list of SQL clause strings, list of parameters).
+    """
+    clauses = []
+    params: list = []
+
+    if tag_filter:
+        placeholders = ",".join("?" * len(tag_filter))
+        clauses.append(f"""
+            r.id IN (
+                SELECT resource_id FROM resource_tags
+                WHERE tag IN ({placeholders})
+            )
+        """)
+        params.extend(tag_filter)
+
+    if resource_type:
+        clauses.append("r.type = ?")
+        params.append(resource_type)
+
+    if versions:
+        placeholders = ",".join("?" * len(versions))
+        clauses.append(f"""
+            r.id IN (
+                SELECT resource_id FROM resource_versions
+                WHERE version IN ({placeholders})
+            )
+        """)
+        params.extend(versions)
+
+    return clauses, params
+
+
+def _fetch_resource_metadata(
+    conn: sqlite3.Connection,
+    resource_id: str,
+) -> tuple[set[str], list[str]]:
+    """Fetch versions and tags for a resource.
+
+    Args:
+        conn: Database connection.
+        resource_id: The resource ID.
+
+    Returns:
+        Tuple of (versions_set, tags_list).
+    """
+    cursor = conn.execute(
+        "SELECT version FROM resource_versions WHERE resource_id = ?",
+        (resource_id,),
+    )
+    versions = {r["version"] for r in cursor.fetchall()}
+
+    cursor = conn.execute(
+        "SELECT tag FROM resource_tags WHERE resource_id = ?",
+        (resource_id,),
+    )
+    tags = [r["tag"] for r in cursor.fetchall()]
+
+    return versions, tags
 
 
 def _normalize_text(text: str) -> str:
@@ -81,12 +300,12 @@ def _keyword_score(query: str, title: str, content: str) -> float:
 
     score = 0.0
     for term in query_terms:
-        # Title match (weighted 3x)
+        # Title match (weighted higher)
         if term in title_norm:
-            score += 3.0
+            score += KEYWORD_TITLE_WEIGHT
         # Content match
         if term in content_norm:
-            score += 1.0
+            score += KEYWORD_CONTENT_WEIGHT
 
     # Normalize by number of terms
     return score / len(query_terms)
@@ -95,7 +314,7 @@ def _keyword_score(query: str, title: str, content: str) -> float:
 # --- v6: Improved Scoring Functions ---
 
 
-def _distance_to_score(distance: float, k: float = 6.0, center: float = 1.15) -> float:
+def _distance_to_score(distance: float, k: float = SIGMOID_STEEPNESS, center: float = SIGMOID_CENTER) -> float:
     """Convert cosine distance to score using sigmoid function.
 
     This provides much better differentiation than 1/(1+d):
@@ -144,11 +363,11 @@ def _keyword_score_with_tags(
     score = 0.0
     for term in query_terms:
         if term in title_norm:
-            score += 3.0
+            score += KEYWORD_TITLE_WEIGHT
         if term in tags_lower:
-            score += 2.5
+            score += KEYWORD_TAG_WEIGHT
         if term in content_norm:
-            score += 1.0
+            score += KEYWORD_CONTENT_WEIGHT
 
     return score / len(query_terms)
 
@@ -190,7 +409,7 @@ def _compute_resource_score(
     kw_boost = min(0.15, kw_raw * 0.025)
 
     # Chunk specificity boost
-    specificity_mult = 1.03 if chunk_boost else 1.0
+    specificity_mult = CHUNK_SPECIFICITY_MULT if chunk_boost else 1.0
 
     # Combine
     score = (base + kw_boost) * version_score * specificity_mult
@@ -338,43 +557,16 @@ def _execute_vector_search(
     """
     params: list = [embedding_blob, limit * 2]  # Fetch extra for filtering
 
-    # Add filters
-    filter_clauses = []
-    if tag_filter:
-        placeholders = ",".join("?" * len(tag_filter))
-        filter_clauses.append(f"""
-            l.id IN (
-                SELECT lesson_id FROM lesson_tags
-                WHERE tag IN ({placeholders})
-            )
-        """)
-        params.extend(tag_filter)
-
-    if context_filter:
-        placeholders = ",".join("?" * len(context_filter))
-        filter_clauses.append(f"""
-            l.id IN (
-                SELECT lesson_id FROM lesson_contexts
-                WHERE context IN ({placeholders}) AND applies = TRUE
-            )
-        """)
-        params.extend(context_filter)
-
-    if confidence_min:
-        filter_clauses.append("""
-            l.confidence IN (
-                SELECT name FROM confidence_levels
-                WHERE ordinal >= (SELECT ordinal FROM confidence_levels WHERE name = ?)
-            )
-        """)
-        params.append(confidence_min)
-
-    if source_filter:
-        filter_clauses.append("l.source = ?")
-        params.append(source_filter)
-
+    # Add filters using helper
+    filter_clauses, filter_params = _build_lesson_filter_clauses(
+        tag_filter=tag_filter,
+        context_filter=context_filter,
+        confidence_min=confidence_min,
+        source=source_filter,
+    )
     if filter_clauses:
         query += " AND " + " AND ".join(filter_clauses)
+        params.extend(filter_params)
 
     query += " ORDER BY le.distance LIMIT ?"
     params.append(limit)
@@ -392,40 +584,16 @@ def _get_filtered_lessons(
 ) -> list[sqlite3.Row]:
     """Get lessons with optional filters applied."""
     query = "SELECT * FROM lessons l WHERE 1=1"
-    params: list = []
 
-    if tag_filter:
-        placeholders = ",".join("?" * len(tag_filter))
-        query += f"""
-            AND l.id IN (
-                SELECT lesson_id FROM lesson_tags
-                WHERE tag IN ({placeholders})
-            )
-        """
-        params.extend(tag_filter)
-
-    if context_filter:
-        placeholders = ",".join("?" * len(context_filter))
-        query += f"""
-            AND l.id IN (
-                SELECT lesson_id FROM lesson_contexts
-                WHERE context IN ({placeholders}) AND applies = TRUE
-            )
-        """
-        params.extend(context_filter)
-
-    if confidence_min:
-        query += """
-            AND l.confidence IN (
-                SELECT name FROM confidence_levels
-                WHERE ordinal >= (SELECT ordinal FROM confidence_levels WHERE name = ?)
-            )
-        """
-        params.append(confidence_min)
-
-    if source_filter:
-        query += " AND l.source = ?"
-        params.append(source_filter)
+    # Build filters using helper
+    filter_clauses, params = _build_lesson_filter_clauses(
+        tag_filter=tag_filter,
+        context_filter=context_filter,
+        confidence_min=confidence_min,
+        source=source_filter,
+    )
+    if filter_clauses:
+        query += " AND " + " AND ".join(filter_clauses)
 
     cursor = conn.execute(query, params)
     return cursor.fetchall()
@@ -436,8 +604,8 @@ def _row_to_result(
     row: sqlite3.Row,
     score_or_distance: float,
     query: str = "",
-) -> SearchResult:
-    """Convert a database row to a SearchResult.
+) -> LessonResult:
+    """Convert a database row to a LessonResult.
 
     Args:
         conn: Database connection.
@@ -449,25 +617,8 @@ def _row_to_result(
     """
     lesson_id = row["id"]
 
-    # Get tags
-    cursor = conn.execute(
-        "SELECT tag FROM lesson_tags WHERE lesson_id = ?",
-        (lesson_id,)
-    )
-    tags = [r["tag"] for r in cursor.fetchall()]
-
-    # Get contexts
-    cursor = conn.execute(
-        "SELECT context, applies FROM lesson_contexts WHERE lesson_id = ?",
-        (lesson_id,)
-    )
-    contexts = []
-    anti_contexts = []
-    for r in cursor.fetchall():
-        if r["applies"]:
-            contexts.append(r["context"])
-        else:
-            anti_contexts.append(r["context"])
+    # Get tags, contexts, and anti_contexts
+    tags, contexts, anti_contexts = _fetch_lesson_properties(conn, lesson_id)
 
     # Compute score
     if query:
@@ -480,16 +631,16 @@ def _row_to_result(
         # Use precomputed score (from keyword search)
         final_score = score_or_distance
 
-    return SearchResult(
+    return LessonResult(
         id=lesson_id,
         title=row["title"],
         content=row["content"],
         score=final_score,
         result_type="lesson",
+        tags=tags,
         confidence=row["confidence"],
         source=row["source"],
         source_notes=row["source_notes"],
-        tags=tags,
         contexts=contexts,
         anti_contexts=anti_contexts,
     )
@@ -679,26 +830,15 @@ def _process_resource_row(
     query_versions: set[str],
     tag_filter: Optional[list[str]],
     query: str = "",
-) -> Optional[SearchResult]:
-    """Process a resource row into a SearchResult."""
-    # Get versions for this resource
-    cursor = conn.execute(
-        "SELECT version FROM resource_versions WHERE resource_id = ?",
-        (row["id"],)
-    )
-    resource_versions = {r["version"] for r in cursor.fetchall()}
+) -> Optional[ResourceResult]:
+    """Process a resource row into a ResourceResult."""
+    # Get versions and tags for this resource
+    resource_versions, tags = _fetch_resource_metadata(conn, row["id"])
 
     # Apply version scoring
     version_score = compute_version_score(resource_versions, query_versions)
     if version_score == 0.0:
         return None  # Skip disjoint versions
-
-    # Get tags
-    cursor = conn.execute(
-        "SELECT tag FROM resource_tags WHERE resource_id = ?",
-        (row["id"],)
-    )
-    tags = [r["tag"] for r in cursor.fetchall()]
 
     # Calculate final score using improved scoring
     final_score = _compute_resource_score(
@@ -711,16 +851,16 @@ def _process_resource_row(
         chunk_boost=False,
     )
 
-    return SearchResult(
+    return ResourceResult(
         id=row["id"],
         title=row["title"],
         content=row["content"][:500] if row["content"] else "",  # Snippet
         score=final_score,
         result_type="resource",
+        tags=tags,
         resource_type=row["type"],
         versions=list(resource_versions),
         path=row["path"],
-        tags=tags,
     )
 
 
@@ -729,28 +869,17 @@ def _process_chunk_row(
     row: sqlite3.Row,
     query_versions: set[str],
     query: str = "",
-) -> Optional[SearchResult]:
-    """Process a chunk row into a SearchResult."""
+) -> Optional[ChunkResult]:
+    """Process a chunk row into a ChunkResult."""
     resource_id = row["resource_id"]
 
-    # Get versions for parent resource
-    cursor = conn.execute(
-        "SELECT version FROM resource_versions WHERE resource_id = ?",
-        (resource_id,)
-    )
-    resource_versions = {r["version"] for r in cursor.fetchall()}
+    # Get versions and tags for parent resource
+    resource_versions, tags = _fetch_resource_metadata(conn, resource_id)
 
     # Apply version scoring
     version_score = compute_version_score(resource_versions, query_versions)
     if version_score == 0.0:
         return None  # Skip disjoint versions
-
-    # Get tags from parent resource
-    cursor = conn.execute(
-        "SELECT tag FROM resource_tags WHERE resource_id = ?",
-        (resource_id,)
-    )
-    tags = [r["tag"] for r in cursor.fetchall()]
 
     # Build display title including breadcrumb
     display_title = row["resource_title"]
@@ -776,24 +905,24 @@ def _process_chunk_row(
         import json
         sections = json.loads(row["sections"])
 
-    return SearchResult(
+    return ChunkResult(
         id=row["id"],  # Chunk ID
         title=display_title,
         content=row["content"][:500] if row["content"] else "",
         score=final_score,
         result_type="chunk",
-        resource_type=row["resource_type"],
-        versions=list(resource_versions),
-        path=row["resource_path"],
         tags=tags,
         # Chunk-specific fields
-        chunk_id=row["id"],
         chunk_index=row["chunk_index"],
-        chunk_breadcrumb=row["breadcrumb"],
+        breadcrumb=row["breadcrumb"],
         resource_id=resource_id,
         resource_title=row["resource_title"],
+        versions=list(resource_versions),
         summary=row["summary"],
         sections=sections,
+        # Parent resource metadata
+        resource_type=row["resource_type"],
+        path=row["resource_path"],
     )
 
 
@@ -944,7 +1073,7 @@ def search_rules(
             # Simple keyword scoring for rules
             score = _keyword_score(query, row["title"], row["content"])
             if score == 0:
-                score = 0.5  # Default score for tag-matched rules
+                score = RULE_DEFAULT_SCORE  # Default score for tag-matched rules
 
             # Get tags
             cursor = conn.execute(
@@ -953,15 +1082,15 @@ def search_rules(
             )
             tags = [r["tag"] for r in cursor.fetchall()]
 
-            results.append(SearchResult(
+            results.append(RuleResult(
                 id=row["id"],
                 title=row["title"],
                 content=row["content"],
                 score=score,
                 result_type="rule",
+                tags=tags,
                 rationale=row["rationale"],
                 approved=bool(row["approved"]),
-                tags=tags,
             ))
 
         results.sort(key=lambda x: x.score, reverse=True)
@@ -971,8 +1100,8 @@ def search_rules(
 def _apply_link_boosting(
     results: list[SearchResult],
     config: Config,
-    link_boost_factor: float = 0.25,
-    min_linked_score: float = 0.65,
+    link_boost_factor: float = LINK_BOOST_FACTOR,
+    min_linked_score: float = MIN_LINKED_SCORE,
 ) -> list[SearchResult]:
     """Apply link-based score boosting to results.
 
@@ -1005,12 +1134,13 @@ def _apply_link_boosting(
     with get_db(config) as conn:
         for result in results:
             if result.result_type == "lesson":
-                # Check for linked resources
+                # Check for linked resources (lesson→resource edges)
                 cursor = conn.execute(
-                    "SELECT resource_id FROM lesson_links WHERE lesson_id = ?",
+                    """SELECT to_id FROM edges
+                       WHERE from_id = ? AND from_type = 'lesson' AND to_type = 'resource'""",
                     (result.id,)
                 )
-                linked_resource_ids = [row["resource_id"] for row in cursor.fetchall()]
+                linked_resource_ids = [row["to_id"] for row in cursor.fetchall()]
 
                 # Find best score from linked resources (only if above threshold)
                 best_linked_score = 0.0
@@ -1050,7 +1180,7 @@ def _apply_context_boosting(
     }
 
     # Apply boosting
-    match_bonus = 0.1
+    match_bonus = MATCH_BONUS
     for result in results:
         boost = 0.0
         for tag in result.tags:

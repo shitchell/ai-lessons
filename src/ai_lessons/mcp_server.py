@@ -1,5 +1,7 @@
 """MCP server for ai-lessons."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import subprocess
@@ -69,9 +71,9 @@ def _search_result_to_dict(result) -> dict:
             "resource_type": result.resource_type,
             "versions": result.versions,
             "path": result.path,
-            "chunk_id": result.chunk_id,
+            "chunk_id": result.id,  # Chunk ID is in the base id field
             "chunk_index": result.chunk_index,
-            "chunk_breadcrumb": result.chunk_breadcrumb,
+            "chunk_breadcrumb": result.breadcrumb,
             "resource_id": result.resource_id,
             "resource_title": result.resource_title,
         })
@@ -885,7 +887,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="Error: Script execution timed out (60s limit)")]
             except PermissionError:
                 return [TextContent(type="text", text=f"Error: Script is not executable: {resource.path}")]
-            except Exception as e:
+            except OSError as e:
                 return [TextContent(type="text", text=f"Error running script: {str(e)}")]
 
         elif name == "delete_resource":

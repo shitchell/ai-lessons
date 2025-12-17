@@ -1,5 +1,7 @@
 """Database operations for ai-lessons."""
 
+from __future__ import annotations
+
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator, Optional
@@ -304,6 +306,116 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
             conn.execute("ALTER TABLE search_feedback ADD COLUMN version TEXT")
 
         current_version = 8
+
+    if current_version < 9:
+        # v9: Unify link tables into edges, rename resource_links to resource_anchors
+
+        # 1. Create new edges table structure
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS edges_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_id TEXT NOT NULL,
+                from_type TEXT NOT NULL CHECK (from_type IN ('lesson', 'resource', 'chunk')),
+                to_id TEXT NOT NULL,
+                to_type TEXT NOT NULL CHECK (to_type IN ('lesson', 'resource', 'chunk')),
+                relation TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(from_id, from_type, to_id, to_type, relation)
+            )
+        """)
+
+        # 2. Migrate existing edges (lesson→lesson)
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='edges'")
+        if cursor.fetchone():
+            conn.execute("""
+                INSERT INTO edges_new (from_id, from_type, to_id, to_type, relation, created_at)
+                SELECT from_id, 'lesson', to_id, 'lesson', relation, created_at
+                FROM edges
+            """)
+
+        # 3. Migrate lesson_links (lesson→resource)
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lesson_links'")
+        if cursor.fetchone():
+            conn.execute("""
+                INSERT INTO edges_new (from_id, from_type, to_id, to_type, relation, created_at)
+                SELECT lesson_id, 'lesson', resource_id, 'resource', relation, created_at
+                FROM lesson_links
+            """)
+            conn.execute("DROP TABLE lesson_links")
+
+        # 4. Create resource_anchors table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resource_anchors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                edge_id INTEGER REFERENCES edges_new(id) ON DELETE CASCADE,
+                to_path TEXT NOT NULL,
+                to_fragment TEXT,
+                link_text TEXT
+            )
+        """)
+
+        # 5. Migrate resource_links to edges + resource_anchors
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_links'")
+        if cursor.fetchone():
+            # Get all resource_links with resolved targets
+            cursor = conn.execute("""
+                SELECT id, from_resource_id, from_chunk_id, to_path, to_fragment, link_text,
+                       resolved_resource_id, resolved_chunk_id
+                FROM resource_links
+                WHERE resolved_resource_id IS NOT NULL
+            """)
+
+            for row in cursor.fetchall():
+                # Determine from_type and from_id
+                if row["from_chunk_id"]:
+                    from_id = row["from_chunk_id"]
+                    from_type = "chunk"
+                else:
+                    from_id = row["from_resource_id"]
+                    from_type = "resource"
+
+                # Determine to_type and to_id
+                if row["resolved_chunk_id"]:
+                    to_id = row["resolved_chunk_id"]
+                    to_type = "chunk"
+                else:
+                    to_id = row["resolved_resource_id"]
+                    to_type = "resource"
+
+                # Insert edge
+                conn.execute("""
+                    INSERT OR IGNORE INTO edges_new (from_id, from_type, to_id, to_type, relation)
+                    VALUES (?, ?, ?, ?, 'references')
+                """, (from_id, from_type, to_id, to_type))
+
+                # Get the edge ID
+                edge_cursor = conn.execute("""
+                    SELECT id FROM edges_new
+                    WHERE from_id = ? AND from_type = ? AND to_id = ? AND to_type = ? AND relation = 'references'
+                """, (from_id, from_type, to_id, to_type))
+                edge_row = edge_cursor.fetchone()
+
+                if edge_row:
+                    # Insert anchor metadata
+                    conn.execute("""
+                        INSERT INTO resource_anchors (edge_id, to_path, to_fragment, link_text)
+                        VALUES (?, ?, ?, ?)
+                    """, (edge_row["id"], row["to_path"], row["to_fragment"], row["link_text"]))
+
+            conn.execute("DROP TABLE resource_links")
+
+        # 6. Replace old edges table
+        conn.execute("DROP TABLE IF EXISTS edges")
+        conn.execute("ALTER TABLE edges_new RENAME TO edges")
+
+        # 7. Create indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id, from_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id, to_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_edge ON resource_anchors(edge_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_resource_anchors_path ON resource_anchors(to_path)")
+
+        current_version = 9
 
     # Update schema version
     conn.execute(

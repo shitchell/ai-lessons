@@ -1,5 +1,7 @@
 """Embedding backends for ai-lessons."""
 
+from __future__ import annotations
+
 import os
 from abc import ABC, abstractmethod
 from typing import Optional
