@@ -326,6 +326,37 @@ def _fetch_lesson_properties(
 # --- Embedding Helpers ---
 
 
+def _truncate_for_embedding(text: str, max_tokens: int = 7500) -> str:
+    """Truncate text to fit within embedding token limit.
+
+    For large documents that will be chunked, we create a truncated version
+    for the resource-level embedding. This allows resource-level search to
+    work while detailed content is searchable via chunk embeddings.
+
+    Args:
+        text: Text to truncate.
+        max_tokens: Maximum tokens allowed (default 7500, conservative to ensure we stay
+            under 8192 limit accounting for title and tokenization variance).
+
+    Returns:
+        Truncated text that fits within token limit.
+    """
+    # Use same token estimation as chunking module: chars / 4
+    # This is conservative since actual tokenization may vary
+    estimated_tokens = len(text) // 4
+
+    if estimated_tokens <= max_tokens:
+        return text
+
+    # Calculate how many characters we can keep (conservative)
+    # Use 3.5 chars per token to be extra safe
+    max_chars = int(max_tokens * 3.5)
+
+    # Truncate and add indicator
+    truncated = text[:max_chars].rsplit('\n', 1)[0]  # Try to keep complete lines
+    return truncated + "\n\n[Content truncated for embedding - see chunks for full content]"
+
+
 def _store_embedding(
     conn,
     entity_id: str,
@@ -342,7 +373,11 @@ def _store_embedding(
         text: Text to embed.
         config: Configuration for embedding model.
     """
-    embedding = embed_text(text, config)
+    # Truncate text if needed to fit within embedding model limits
+    # This is primarily for resource-level embeddings of large documents
+    truncated_text = _truncate_for_embedding(text)
+
+    embedding = embed_text(truncated_text, config)
     embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
 
     table_map = {
