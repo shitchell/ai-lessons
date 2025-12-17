@@ -219,6 +219,92 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
 
         current_version = 4
 
+    if current_version < 5:
+        # v5 adds sections column to resource_chunks and resource_links table
+        cursor = conn.execute("PRAGMA table_info(resource_chunks)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "sections" not in existing_cols:
+            conn.execute("ALTER TABLE resource_chunks ADD COLUMN sections TEXT")
+
+        # Create resource_links table if not exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resource_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                from_chunk_id TEXT REFERENCES resource_chunks(id) ON DELETE CASCADE,
+                to_path TEXT NOT NULL,
+                to_fragment TEXT,
+                link_text TEXT,
+                resolved_resource_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
+                resolved_chunk_id TEXT REFERENCES resource_chunks(id) ON DELETE SET NULL
+            )
+        """)
+
+        # Create indexes
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_resource_links_to_path ON resource_links(to_path)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_resource_links_from_resource ON resource_links(from_resource_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_resource_links_resolved ON resource_links(resolved_resource_id)"
+        )
+
+        current_version = 5
+
+    if current_version < 6:
+        # v6 adds lesson_links table for lesson-to-resource linking
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lesson_links (
+                lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+                resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                relation TEXT NOT NULL DEFAULT 'related_to',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (lesson_id, resource_id)
+            )
+        """)
+
+        # Create indexes
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lesson_links_lesson ON lesson_links(lesson_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lesson_links_resource ON lesson_links(resource_id)"
+        )
+
+        current_version = 6
+
+    if current_version < 7:
+        # v7 adds search_feedback table for quality monitoring
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS search_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                queries TEXT NOT NULL,
+                invocation_count INTEGER NOT NULL,
+                suggestion TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_feedback_created ON search_feedback(created_at)"
+        )
+
+        current_version = 7
+
+    if current_version < 8:
+        # v8 adds version column to search_feedback table
+        cursor = conn.execute("PRAGMA table_info(search_feedback)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "version" not in existing_cols:
+            conn.execute("ALTER TABLE search_feedback ADD COLUMN version TEXT")
+
+        current_version = 8
+
     # Update schema version
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",

@@ -1,6 +1,6 @@
 """Database schema definitions for ai-lessons."""
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 # Schema creation SQL
 SCHEMA_SQL = """
@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS resource_tags (
 -- v2: Resource chunks (for large documents)
 -- v3: Added breadcrumb, start_line, end_line, token_count
 -- v4: Added summary, summary_generated_at for LLM-generated summaries
+-- v5: Added sections for headers within chunk
 CREATE TABLE IF NOT EXISTS resource_chunks (
     id TEXT PRIMARY KEY,
     resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
@@ -120,7 +121,8 @@ CREATE TABLE IF NOT EXISTS resource_chunks (
     end_line INTEGER,                       -- Ending line in source document
     token_count INTEGER,                    -- Estimated token count
     summary TEXT,                           -- LLM-generated summary
-    summary_generated_at TIMESTAMP          -- When summary was generated (for cache invalidation)
+    summary_generated_at TIMESTAMP,         -- When summary was generated (for cache invalidation)
+    sections TEXT                           -- JSON array of headers within chunk
 );
 
 -- v2: Rules table (prescriptive guidance)
@@ -151,6 +153,51 @@ CREATE TABLE IF NOT EXISTS rule_links (
     target_type TEXT NOT NULL CHECK (target_type IN ('lesson', 'resource')),
     PRIMARY KEY (rule_id, target_id)
 );
+
+-- v6: Lesson links (to resources)
+CREATE TABLE IF NOT EXISTS lesson_links (
+    lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL DEFAULT 'related_to',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (lesson_id, resource_id)
+);
+
+-- v6: Indexes for lesson_links
+CREATE INDEX IF NOT EXISTS idx_lesson_links_lesson ON lesson_links(lesson_id);
+CREATE INDEX IF NOT EXISTS idx_lesson_links_resource ON lesson_links(resource_id);
+
+-- v7: Search feedback for quality monitoring
+-- v8: Added version column
+CREATE TABLE IF NOT EXISTS search_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task TEXT NOT NULL,                     -- What the user was trying to find
+    queries TEXT NOT NULL,                  -- Semicolon-separated list of queries used
+    invocation_count INTEGER NOT NULL,      -- Number of invocations to find helpful info
+    suggestion TEXT,                        -- Optional feedback/suggestions
+    version TEXT,                           -- ai-lessons version when feedback was submitted
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- v7: Indexes for search_feedback
+CREATE INDEX IF NOT EXISTS idx_search_feedback_created ON search_feedback(created_at);
+
+-- v5: Resource links (extracted markdown links)
+CREATE TABLE IF NOT EXISTS resource_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+    from_chunk_id TEXT REFERENCES resource_chunks(id) ON DELETE CASCADE,
+    to_path TEXT NOT NULL,                  -- Absolute path of linked file
+    to_fragment TEXT,                       -- Fragment/anchor without # (nullable)
+    link_text TEXT,                         -- The display text from [text](path)
+    resolved_resource_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
+    resolved_chunk_id TEXT REFERENCES resource_chunks(id) ON DELETE SET NULL
+);
+
+-- v5: Indexes for resource_links
+CREATE INDEX IF NOT EXISTS idx_resource_links_to_path ON resource_links(to_path);
+CREATE INDEX IF NOT EXISTS idx_resource_links_from_resource ON resource_links(from_resource_id);
+CREATE INDEX IF NOT EXISTS idx_resource_links_resolved ON resource_links(resolved_resource_id);
 
 -- v2: Indexes for resources
 CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type);

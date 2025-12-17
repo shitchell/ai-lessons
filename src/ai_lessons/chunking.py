@@ -61,6 +61,9 @@ class Chunk:
     # Metrics
     token_count: int  # Estimated
 
+    # Section hints (v5)
+    sections: list[str] = field(default_factory=list)  # Headers within this chunk
+
     # Flags
     is_continuation: bool = False  # Part of an oversized section
     continuation_of: int | None = None  # Index of chunk this continues
@@ -111,6 +114,36 @@ class ChunkingResult:
 def estimate_tokens(text: str) -> int:
     """Estimate token count. Approximation: chars / 4."""
     return len(text) // 4
+
+
+def extract_sections(content: str) -> list[str]:
+    """Extract header texts from markdown content.
+
+    Scans for markdown headers (# to ######) and returns their text,
+    cleaned of formatting markers.
+
+    Args:
+        content: Markdown content to scan.
+
+    Returns:
+        List of header texts, cleaned of formatting.
+    """
+    # Match markdown headers (# to ######)
+    header_pattern = r"^#{1,6}\s+(.+)$"
+    matches = re.findall(header_pattern, content, re.MULTILINE)
+
+    sections = []
+    for header in matches:
+        # Clean up: remove bold/italic markers, trailing anchors, etc.
+        cleaned = header.strip()
+        cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)  # **bold**
+        cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)  # *italic*
+        cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)  # `code`
+        cleaned = re.sub(r'\s*<a\s+name="[^"]*">\s*</a>\s*', "", cleaned)  # anchors
+        cleaned = re.sub(r"\s*\{#[^}]+\}\s*$", "", cleaned)  # {#anchor} suffix
+        sections.append(cleaned.strip())
+
+    return sections
 
 
 def detect_strategy(content: str, config: ChunkingConfig) -> tuple[str, str]:
@@ -578,6 +611,10 @@ def chunk_document(
             chunk.warnings.append("oversized")
         if chunk.token_count < config.min_chunk_size:
             chunk.warnings.append("undersized")
+
+    # Extract sections (headers within each chunk) for section hints
+    for chunk in chunks:
+        chunk.sections = extract_sections(chunk.content)
 
     return ChunkingResult(
         document_path=source_path or "<string>",

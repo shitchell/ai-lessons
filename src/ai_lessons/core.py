@@ -1,5 +1,6 @@
 """Core API for ai-lessons."""
 
+import json
 import struct
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,9 +8,17 @@ from typing import Optional, TYPE_CHECKING
 
 from ulid import ULID
 
+from . import __version__
 from .config import Config, get_config
 from .db import get_db, init_db
 from .embeddings import embed_text
+from .links import (
+    ExtractedLink,
+    extract_links,
+    find_chunk_for_line,
+    resolve_fragment_to_chunk,
+    resolve_link_to_resource,
+)
 from .search import SearchResult, hybrid_search, keyword_search, vector_search
 
 if TYPE_CHECKING:
@@ -81,12 +90,15 @@ class ResourceChunk:
     token_count: Optional[int] = None
     summary: Optional[str] = None
     summary_generated_at: Optional[datetime] = None
+    sections: list[str] = None  # Headers within this chunk
     # Populated when fetching with parent info
     resource_title: Optional[str] = None
     resource_versions: list[str] = None
     resource_tags: list[str] = None
 
     def __post_init__(self):
+        if self.sections is None:
+            self.sections = []
         if self.resource_versions is None:
             self.resource_versions = []
         if self.resource_tags is None:
@@ -141,12 +153,25 @@ class Tag:
     count: int = 0
 
 
+@dataclass
+class ResourceLink:
+    """A link between resources extracted from document content."""
+    id: int
+    from_resource_id: str
+    from_chunk_id: Optional[str] = None
+    to_path: str = ""
+    to_fragment: Optional[str] = None
+    link_text: Optional[str] = None
+    resolved_resource_id: Optional[str] = None
+    resolved_chunk_id: Optional[str] = None
+
+
 def ensure_initialized(config: Optional[Config] = None) -> None:
-    """Ensure the database is initialized."""
+    """Ensure the database is initialized and migrated."""
     if config is None:
         config = get_config()
-    if not config.db_path.exists():
-        init_db(config)
+    # Always call init_db - it handles both new DBs and migrations
+    init_db(config)
 
 
 def _resolve_tag_aliases(tags: list[str], config: Config) -> list[str]:
@@ -644,6 +669,158 @@ def unlink_lessons(
         return cursor.rowcount
 
 
+# --- Lesson-Resource Linking (v6) ---
+
+
+def link_lesson_to_resource(
+    lesson_id: str,
+    resource_id: str,
+    relation: str = "related_to",
+    config: Optional[Config] = None,
+) -> bool:
+    """Link a lesson to a resource.
+
+    Args:
+        lesson_id: The lesson ID.
+        resource_id: The resource ID to link to.
+        relation: Relationship type (e.g., "related_to", "documents", "example_of").
+        config: Configuration to use.
+
+    Returns:
+        True if link was created, False if already exists.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO lesson_links (lesson_id, resource_id, relation) VALUES (?, ?, ?)",
+                (lesson_id, resource_id, relation),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            # Link already exists
+            return False
+
+
+def unlink_lesson_from_resource(
+    lesson_id: str,
+    resource_id: str,
+    config: Optional[Config] = None,
+) -> bool:
+    """Remove a link between a lesson and a resource.
+
+    Args:
+        lesson_id: The lesson ID.
+        resource_id: The resource ID to unlink.
+        config: Configuration to use.
+
+    Returns:
+        True if link was removed, False if didn't exist.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            "DELETE FROM lesson_links WHERE lesson_id = ? AND resource_id = ?",
+            (lesson_id, resource_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+@dataclass
+class LessonResourceLink:
+    """A link between a lesson and a resource."""
+    lesson_id: str
+    resource_id: str
+    relation: str
+    created_at: str
+
+
+def get_lesson_resource_links(
+    lesson_id: str,
+    config: Optional[Config] = None,
+) -> list[LessonResourceLink]:
+    """Get all resources linked to a lesson.
+
+    Args:
+        lesson_id: The lesson ID.
+        config: Configuration to use.
+
+    Returns:
+        List of links from this lesson to resources.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            """
+            SELECT lesson_id, resource_id, relation, created_at
+            FROM lesson_links
+            WHERE lesson_id = ?
+            """,
+            (lesson_id,),
+        )
+        return [
+            LessonResourceLink(
+                lesson_id=row["lesson_id"],
+                resource_id=row["resource_id"],
+                relation=row["relation"],
+                created_at=row["created_at"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+def get_lessons_for_resource(
+    resource_id: str,
+    config: Optional[Config] = None,
+) -> list[LessonResourceLink]:
+    """Get all lessons linked to a resource.
+
+    Args:
+        resource_id: The resource ID.
+        config: Configuration to use.
+
+    Returns:
+        List of links from lessons to this resource.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            """
+            SELECT lesson_id, resource_id, relation, created_at
+            FROM lesson_links
+            WHERE resource_id = ?
+            """,
+            (resource_id,),
+        )
+        return [
+            LessonResourceLink(
+                lesson_id=row["lesson_id"],
+                resource_id=row["resource_id"],
+                relation=row["relation"],
+                created_at=row["created_at"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+
 # --- Reference Table Operations ---
 
 
@@ -841,7 +1018,7 @@ def _store_chunks(
     path: Optional[str],
     chunking_config: Optional["ChunkingConfig"],
     config: Config,
-) -> int:
+) -> list[tuple[str, "Chunk"]]:
     """Chunk content and store chunks with embeddings.
 
     Args:
@@ -853,9 +1030,9 @@ def _store_chunks(
         config: Application config.
 
     Returns:
-        Number of chunks stored.
+        List of (chunk_id, chunk) tuples for link resolution.
     """
-    from .chunking import ChunkingConfig, chunk_document
+    from .chunking import Chunk, ChunkingConfig, chunk_document
 
     # Use default config if none provided
     if chunking_config is None:
@@ -864,16 +1041,22 @@ def _store_chunks(
     # Chunk the document
     result = chunk_document(content, chunking_config, source_path=path)
 
-    # Store each chunk
+    # Store each chunk, keeping track of IDs for link resolution
+    stored_chunks: list[tuple[str, Chunk]] = []
+
     for chunk in result.chunks:
         chunk_id = _generate_id()
+        stored_chunks.append((chunk_id, chunk))
+
+        # Serialize sections to JSON
+        sections_json = json.dumps(chunk.sections) if chunk.sections else None
 
         # Insert chunk
         conn.execute(
             """
             INSERT INTO resource_chunks
-                (id, resource_id, chunk_index, title, content, breadcrumb, start_line, end_line, token_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, resource_id, chunk_index, title, content, breadcrumb, start_line, end_line, token_count, sections)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 chunk_id,
@@ -885,6 +1068,7 @@ def _store_chunks(
                 chunk.start_line,
                 chunk.end_line,
                 chunk.token_count,
+                sections_json,
             ),
         )
 
@@ -906,7 +1090,163 @@ def _store_chunks(
             (chunk_id, embedding_blob),
         )
 
-    return len(result.chunks)
+    return stored_chunks
+
+
+def _find_chunk_id_for_line(
+    stored_chunks: list[tuple[str, "Chunk"]],
+    line_number: int,
+) -> Optional[str]:
+    """Find the chunk ID that contains a given line number.
+
+    Args:
+        stored_chunks: List of (chunk_id, chunk) tuples.
+        line_number: 1-indexed line number.
+
+    Returns:
+        Chunk ID if found, None otherwise.
+    """
+    # Convert to 0-indexed
+    line_idx = line_number - 1
+
+    for chunk_id, chunk in stored_chunks:
+        if chunk.start_line <= line_idx <= chunk.end_line:
+            return chunk_id
+
+    return None
+
+
+def _store_and_resolve_links(
+    conn,
+    resource_id: str,
+    content: str,
+    path: str,
+    stored_chunks: list[tuple[str, "Chunk"]],
+) -> int:
+    """Extract links from content and store them with resolution attempts.
+
+    Args:
+        conn: Database connection.
+        resource_id: ID of the resource containing these links.
+        content: Document content.
+        path: Absolute path of the source file.
+        stored_chunks: List of (chunk_id, chunk) tuples.
+
+    Returns:
+        Number of links stored.
+    """
+    links = extract_links(content, path)
+    count = 0
+
+    for link in links:
+        # Find which chunk this link is in
+        from_chunk_id = _find_chunk_id_for_line(stored_chunks, link.line_number)
+
+        # Attempt resolution
+        resolved_resource_id = resolve_link_to_resource(conn, link.absolute_path)
+        resolved_chunk_id = None
+
+        if resolved_resource_id and link.fragment:
+            resolved_chunk_id = resolve_fragment_to_chunk(
+                conn, resolved_resource_id, link.fragment
+            )
+
+        # Skip self-links (same chunk)
+        if from_chunk_id and from_chunk_id == resolved_chunk_id:
+            continue
+
+        # Store link
+        conn.execute(
+            """
+            INSERT INTO resource_links
+            (from_resource_id, from_chunk_id, to_path, to_fragment, link_text,
+             resolved_resource_id, resolved_chunk_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resource_id,
+                from_chunk_id,
+                link.absolute_path,
+                link.fragment,
+                link.link_text,
+                resolved_resource_id,
+                resolved_chunk_id,
+            ),
+        )
+        count += 1
+
+    return count
+
+
+def _resolve_dangling_links(
+    conn,
+    new_resource_path: str,
+    new_resource_id: str,
+) -> int:
+    """Find and resolve links pointing to this newly imported resource.
+
+    Args:
+        conn: Database connection.
+        new_resource_path: Path of the newly imported resource.
+        new_resource_id: ID of the newly imported resource.
+
+    Returns:
+        Number of links resolved.
+    """
+    cursor = conn.execute(
+        """
+        SELECT id, from_resource_id, to_fragment
+        FROM resource_links
+        WHERE to_path = ? AND resolved_resource_id IS NULL
+        """,
+        (new_resource_path,),
+    )
+
+    count = 0
+    for row in cursor.fetchall():
+        resolved_chunk_id = None
+        if row["to_fragment"]:
+            resolved_chunk_id = resolve_fragment_to_chunk(
+                conn, new_resource_id, row["to_fragment"]
+            )
+
+        conn.execute(
+            """
+            UPDATE resource_links
+            SET resolved_resource_id = ?, resolved_chunk_id = ?
+            WHERE id = ?
+            """,
+            (new_resource_id, resolved_chunk_id, row["id"]),
+        )
+        count += 1
+
+    return count
+
+
+def get_resource_by_path(
+    path: str,
+    config: Optional[Config] = None,
+) -> Optional[Resource]:
+    """Find a resource by its filesystem path.
+
+    Args:
+        path: Filesystem path to look up.
+        config: Configuration to use.
+
+    Returns:
+        Resource if found, None otherwise.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute("SELECT id FROM resources WHERE path = ?", (path,))
+        row = cursor.fetchone()
+        if row:
+            return get_resource(row["id"], config)
+    return None
 
 
 def add_resource(
@@ -921,6 +1261,9 @@ def add_resource(
 ) -> str:
     """Add a new resource (doc or script) to the database.
 
+    If a resource with the same path already exists, it will be re-imported
+    (existing chunks/links deleted, new ones created, ID preserved).
+
     Args:
         type: Resource type ('doc' or 'script').
         title: Resource title.
@@ -932,7 +1275,7 @@ def add_resource(
         config: Configuration to use.
 
     Returns:
-        The generated resource ID.
+        The generated resource ID (or existing ID if re-importing).
     """
     if config is None:
         config = get_config()
@@ -941,6 +1284,11 @@ def add_resource(
 
     if type not in ('doc', 'script'):
         raise ValueError(f"Invalid resource type: {type}")
+
+    # Resolve path to absolute, canonical form (resolve symlinks)
+    if path:
+        from pathlib import Path as PathLib
+        path = str(PathLib(path).resolve())
 
     if type == 'script' and not path:
         raise ValueError("Scripts require a path")
@@ -952,6 +1300,22 @@ def add_resource(
 
     if not content:
         raise ValueError("Content is required")
+
+    # Check for existing resource (re-import)
+    if path:
+        existing = get_resource_by_path(path, config)
+        if existing:
+            return _reimport_resource(
+                existing.id,
+                type,
+                title,
+                path,
+                content,
+                versions,
+                tags,
+                chunking_config,
+                config,
+            )
 
     # Default to 'unversioned' if no versions specified
     if not versions:
@@ -1000,12 +1364,146 @@ def add_resource(
         )
 
         # Chunk and store chunks for docs
+        stored_chunks = []
         if type == 'doc':
-            _store_chunks(conn, resource_id, content, path, chunking_config, config)
+            stored_chunks = _store_chunks(conn, resource_id, content, path, chunking_config, config)
+
+        # Extract and resolve links (for docs with path)
+        if type == 'doc' and path:
+            _store_and_resolve_links(conn, resource_id, content, path, stored_chunks)
+
+        # Resolve any dangling links pointing to this resource
+        if path:
+            _resolve_dangling_links(conn, path, resource_id)
 
         conn.commit()
 
     return resource_id
+
+
+def _reimport_resource(
+    existing_id: str,
+    type: str,
+    title: str,
+    path: str,
+    content: str,
+    versions: Optional[list[str]],
+    tags: Optional[list[str]],
+    chunking_config: Optional["ChunkingConfig"],
+    config: Config,
+) -> str:
+    """Re-import a resource, keeping the same ID but rebuilding chunks/links.
+
+    Args:
+        existing_id: ID of the existing resource to update.
+        type: Resource type.
+        title: Resource title.
+        path: Filesystem path.
+        content: Document content.
+        versions: List of versions.
+        tags: Optional list of tags.
+        chunking_config: Chunking configuration.
+        config: Application config.
+
+    Returns:
+        The existing resource ID.
+    """
+    # Default to 'unversioned' if no versions specified
+    if not versions:
+        versions = ['unversioned']
+
+    # Resolve tag aliases
+    if tags:
+        tags = _resolve_tag_aliases(tags, config)
+
+    content_hash = _compute_content_hash(content)
+    source_ref = _get_git_ref(path) if path else None
+
+    # Generate new embedding
+    embedding = embed_text(f"{title}\n\n{content}", config)
+    embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
+
+    with get_db(config) as conn:
+        # Delete old chunks (cascades to chunk_embeddings via FK - but vec0 doesn't support FK)
+        # First get chunk IDs to delete embeddings
+        cursor = conn.execute(
+            "SELECT id FROM resource_chunks WHERE resource_id = ?",
+            (existing_id,),
+        )
+        chunk_ids = [row["id"] for row in cursor.fetchall()]
+        for chunk_id in chunk_ids:
+            conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
+
+        conn.execute("DELETE FROM resource_chunks WHERE resource_id = ?", (existing_id,))
+
+        # Delete old links from this resource (keep links TO this resource)
+        conn.execute("DELETE FROM resource_links WHERE from_resource_id = ?", (existing_id,))
+
+        # Update resource metadata
+        conn.execute(
+            """
+            UPDATE resources
+            SET type = ?, title = ?, content = ?, content_hash = ?, source_ref = ?,
+                indexed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (type, title, content, content_hash, source_ref, existing_id),
+        )
+
+        # Update versions
+        conn.execute("DELETE FROM resource_versions WHERE resource_id = ?", (existing_id,))
+        conn.executemany(
+            "INSERT INTO resource_versions (resource_id, version) VALUES (?, ?)",
+            [(existing_id, v) for v in versions],
+        )
+
+        # Update tags
+        conn.execute("DELETE FROM resource_tags WHERE resource_id = ?", (existing_id,))
+        if tags:
+            conn.executemany(
+                "INSERT INTO resource_tags (resource_id, tag) VALUES (?, ?)",
+                [(existing_id, tag) for tag in tags],
+            )
+
+        # Update embedding
+        conn.execute("DELETE FROM resource_embeddings WHERE resource_id = ?", (existing_id,))
+        conn.execute(
+            "INSERT INTO resource_embeddings (resource_id, embedding) VALUES (?, ?)",
+            (existing_id, embedding_blob),
+        )
+
+        # Re-chunk and store
+        stored_chunks = []
+        if type == 'doc':
+            stored_chunks = _store_chunks(conn, existing_id, content, path, chunking_config, config)
+
+        # Re-extract and resolve links
+        if type == 'doc' and path:
+            _store_and_resolve_links(conn, existing_id, content, path, stored_chunks)
+
+        # Re-resolve links TO this resource (fragments may have changed)
+        cursor = conn.execute(
+            """
+            SELECT id, to_fragment
+            FROM resource_links
+            WHERE resolved_resource_id = ?
+            """,
+            (existing_id,),
+        )
+        for row in cursor.fetchall():
+            resolved_chunk_id = None
+            if row["to_fragment"]:
+                resolved_chunk_id = resolve_fragment_to_chunk(
+                    conn, existing_id, row["to_fragment"]
+                )
+            conn.execute(
+                "UPDATE resource_links SET resolved_chunk_id = ? WHERE id = ?",
+                (resolved_chunk_id, row["id"]),
+            )
+
+        conn.commit()
+
+    return existing_id
 
 
 def get_resource(resource_id: str, config: Optional[Config] = None) -> Optional[Resource]:
@@ -1245,6 +1743,11 @@ def get_chunk(
             )
             resource_tags = [r["tag"] for r in cursor.fetchall()]
 
+        # Parse sections from JSON
+        sections = []
+        if row["sections"]:
+            sections = json.loads(row["sections"])
+
         return ResourceChunk(
             id=row["id"],
             resource_id=row["resource_id"],
@@ -1257,6 +1760,7 @@ def get_chunk(
             token_count=row["token_count"],
             summary=row["summary"],
             summary_generated_at=row["summary_generated_at"],
+            sections=sections,
             resource_title=resource_title,
             resource_versions=resource_versions,
             resource_tags=resource_tags,
@@ -1313,25 +1817,34 @@ def list_chunks(
             (resource_id,),
         )
 
-        return [
-            ResourceChunk(
-                id=row["id"],
-                resource_id=row["resource_id"],
-                chunk_index=row["chunk_index"],
-                title=row["title"],
-                content=row["content"],
-                breadcrumb=row["breadcrumb"],
-                start_line=row["start_line"],
-                end_line=row["end_line"],
-                token_count=row["token_count"],
-                summary=row["summary"],
-                summary_generated_at=row["summary_generated_at"],
-                resource_title=resource_title,
-                resource_versions=resource_versions,
-                resource_tags=resource_tags,
+        chunks = []
+        for row in cursor.fetchall():
+            # Parse sections from JSON
+            sections = []
+            if row["sections"]:
+                sections = json.loads(row["sections"])
+
+            chunks.append(
+                ResourceChunk(
+                    id=row["id"],
+                    resource_id=row["resource_id"],
+                    chunk_index=row["chunk_index"],
+                    title=row["title"],
+                    content=row["content"],
+                    breadcrumb=row["breadcrumb"],
+                    start_line=row["start_line"],
+                    end_line=row["end_line"],
+                    token_count=row["token_count"],
+                    summary=row["summary"],
+                    summary_generated_at=row["summary_generated_at"],
+                    sections=sections,
+                    resource_title=resource_title,
+                    resource_versions=resource_versions,
+                    resource_tags=resource_tags,
+                )
             )
-            for row in cursor.fetchall()
-        ]
+
+        return chunks
 
 
 def list_resources(
@@ -1659,3 +2172,493 @@ def link_to_rule(
             return True
         except Exception:
             return False
+
+
+# --- Resource Link Operations (v3) ---
+
+
+def get_chunk_links(
+    chunk_id: str,
+    config: Optional[Config] = None,
+) -> list[ResourceLink]:
+    """Get links from a specific chunk.
+
+    Args:
+        chunk_id: The chunk ID.
+        config: Configuration to use.
+
+    Returns:
+        List of links from this chunk.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            """
+            SELECT * FROM resource_links
+            WHERE from_chunk_id = ?
+            ORDER BY id
+            """,
+            (chunk_id,),
+        )
+
+        return [
+            ResourceLink(
+                id=row["id"],
+                from_resource_id=row["from_resource_id"],
+                from_chunk_id=row["from_chunk_id"],
+                to_path=row["to_path"],
+                to_fragment=row["to_fragment"],
+                link_text=row["link_text"],
+                resolved_resource_id=row["resolved_resource_id"],
+                resolved_chunk_id=row["resolved_chunk_id"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+def get_resource_links(
+    resource_id: str,
+    config: Optional[Config] = None,
+) -> list[ResourceLink]:
+    """Get all links from a resource.
+
+    Args:
+        resource_id: The resource ID.
+        config: Configuration to use.
+
+    Returns:
+        List of links from this resource.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            """
+            SELECT * FROM resource_links
+            WHERE from_resource_id = ?
+            ORDER BY id
+            """,
+            (resource_id,),
+        )
+
+        return [
+            ResourceLink(
+                id=row["id"],
+                from_resource_id=row["from_resource_id"],
+                from_chunk_id=row["from_chunk_id"],
+                to_path=row["to_path"],
+                to_fragment=row["to_fragment"],
+                link_text=row["link_text"],
+                resolved_resource_id=row["resolved_resource_id"],
+                resolved_chunk_id=row["resolved_chunk_id"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+def get_related_resources(
+    resource_id: str,
+    config: Optional[Config] = None,
+) -> tuple[list[ResourceLink], list[ResourceLink]]:
+    """Get outgoing and incoming links for a resource.
+
+    Args:
+        resource_id: The resource ID.
+        config: Configuration to use.
+
+    Returns:
+        Tuple of (outgoing_links, incoming_links).
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        # Outgoing links (from this resource)
+        cursor = conn.execute(
+            """
+            SELECT * FROM resource_links
+            WHERE from_resource_id = ?
+            ORDER BY id
+            """,
+            (resource_id,),
+        )
+        outgoing = [
+            ResourceLink(
+                id=row["id"],
+                from_resource_id=row["from_resource_id"],
+                from_chunk_id=row["from_chunk_id"],
+                to_path=row["to_path"],
+                to_fragment=row["to_fragment"],
+                link_text=row["link_text"],
+                resolved_resource_id=row["resolved_resource_id"],
+                resolved_chunk_id=row["resolved_chunk_id"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+        # Incoming links (to this resource)
+        cursor = conn.execute(
+            """
+            SELECT * FROM resource_links
+            WHERE resolved_resource_id = ?
+            ORDER BY id
+            """,
+            (resource_id,),
+        )
+        incoming = [
+            ResourceLink(
+                id=row["id"],
+                from_resource_id=row["from_resource_id"],
+                from_chunk_id=row["from_chunk_id"],
+                to_path=row["to_path"],
+                to_fragment=row["to_fragment"],
+                link_text=row["link_text"],
+                resolved_resource_id=row["resolved_resource_id"],
+                resolved_chunk_id=row["resolved_chunk_id"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+        return outgoing, incoming
+
+
+def update_resource_paths(
+    from_prefix: str,
+    to_prefix: str,
+    dry_run: bool = False,
+    config: Optional[Config] = None,
+) -> dict[str, int]:
+    """Update paths for resources and links after files move.
+
+    Args:
+        from_prefix: Old path prefix to replace.
+        to_prefix: New path prefix.
+        dry_run: If True, don't actually update, just count.
+        config: Configuration to use.
+
+    Returns:
+        Dict with counts: {'resources': N, 'links': N, 'newly_resolved': N}
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    counts = {"resources": 0, "links": 0, "newly_resolved": 0}
+
+    with get_db(config) as conn:
+        # Find resources with paths matching the prefix
+        cursor = conn.execute(
+            "SELECT id, path FROM resources WHERE path LIKE ?",
+            (f"{from_prefix}%",),
+        )
+        resources_to_update = []
+        for row in cursor.fetchall():
+            old_path = row["path"]
+            new_path = to_prefix + old_path[len(from_prefix):]
+            resources_to_update.append((row["id"], old_path, new_path))
+
+        counts["resources"] = len(resources_to_update)
+
+        # Find links with to_path matching the prefix
+        cursor = conn.execute(
+            "SELECT id, to_path, to_fragment FROM resource_links WHERE to_path LIKE ?",
+            (f"{from_prefix}%",),
+        )
+        links_to_update = []
+        for row in cursor.fetchall():
+            old_path = row["to_path"]
+            new_path = to_prefix + old_path[len(from_prefix):]
+            links_to_update.append((row["id"], old_path, new_path, row["to_fragment"]))
+
+        counts["links"] = len(links_to_update)
+
+        if not dry_run:
+            # Update resource paths
+            for resource_id, old_path, new_path in resources_to_update:
+                conn.execute(
+                    "UPDATE resources SET path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (new_path, resource_id),
+                )
+
+            # Update link paths and attempt resolution
+            for link_id, old_path, new_path, fragment in links_to_update:
+                # Try to resolve the link with the new path
+                resolved_resource_id = resolve_link_to_resource(conn, new_path)
+                resolved_chunk_id = None
+
+                if resolved_resource_id and fragment:
+                    resolved_chunk_id = resolve_fragment_to_chunk(
+                        conn, resolved_resource_id, fragment
+                    )
+
+                # Check if this link was previously unresolved
+                cursor = conn.execute(
+                    "SELECT resolved_resource_id FROM resource_links WHERE id = ?",
+                    (link_id,),
+                )
+                row = cursor.fetchone()
+                was_unresolved = row and row["resolved_resource_id"] is None
+
+                if was_unresolved and resolved_resource_id:
+                    counts["newly_resolved"] += 1
+
+                conn.execute(
+                    """
+                    UPDATE resource_links
+                    SET to_path = ?, resolved_resource_id = ?, resolved_chunk_id = ?
+                    WHERE id = ?
+                    """,
+                    (new_path, resolved_resource_id, resolved_chunk_id, link_id),
+                )
+
+            conn.commit()
+
+    return counts
+
+
+# --- Feedback Operations (v7) ---
+
+
+@dataclass
+class SearchFeedback:
+    """Search quality feedback entry."""
+    id: int
+    task: str
+    queries: list[str]  # Parsed from semicolon-separated string
+    invocation_count: int
+    suggestion: Optional[str]
+    version: Optional[str]
+    created_at: str
+
+
+def add_feedback(
+    task: str,
+    queries: list[str],
+    invocation_count: int,
+    suggestion: Optional[str] = None,
+    config: Optional[Config] = None,
+) -> int:
+    """Record search feedback for quality monitoring.
+
+    Args:
+        task: Brief description of what the user was trying to find.
+        queries: List of queries used during the search session.
+        invocation_count: Number of ai-lessons invocations needed.
+        suggestion: Optional feedback or suggestions.
+        config: Configuration to use.
+
+    Returns:
+        Feedback ID.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Store queries as semicolon-separated string
+    queries_str = ";".join(queries)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO search_feedback (task, queries, invocation_count, suggestion, version)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (task, queries_str, invocation_count, suggestion, __version__),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def list_feedback(
+    limit: int = 50,
+    config: Optional[Config] = None,
+) -> list[SearchFeedback]:
+    """List recent feedback entries.
+
+    Args:
+        limit: Maximum entries to return.
+        config: Configuration to use.
+
+    Returns:
+        List of feedback entries, most recent first.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        cursor = conn.execute(
+            """
+            SELECT id, task, queries, invocation_count, suggestion, version, created_at
+            FROM search_feedback
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [
+            SearchFeedback(
+                id=row["id"],
+                task=row["task"],
+                queries=row["queries"].split(";") if row["queries"] else [],
+                invocation_count=row["invocation_count"],
+                suggestion=row["suggestion"],
+                version=row["version"],
+                created_at=row["created_at"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+def _parse_version(version: str) -> tuple[int, ...]:
+    """Parse a version string into a comparable tuple.
+
+    Handles versions like "0.1.0", "0.1.0-dev", etc.
+    Non-numeric suffixes are stripped for comparison.
+    """
+    # Strip any suffix like "-dev", "-alpha", etc.
+    base_version = version.split("-")[0]
+    parts = base_version.split(".")
+    result = []
+    for part in parts:
+        try:
+            result.append(int(part))
+        except ValueError:
+            # Non-numeric part, skip
+            pass
+    return tuple(result) if result else (0,)
+
+
+def _version_matches(
+    version: Optional[str],
+    version_eq: Optional[str],
+    version_lt: Optional[str],
+    version_gt: Optional[str],
+) -> bool:
+    """Check if a version matches the given filter criteria."""
+    if version is None:
+        # If no version recorded, only match if no filters specified
+        return version_eq is None and version_lt is None and version_gt is None
+
+    parsed = _parse_version(version)
+
+    if version_eq is not None:
+        if parsed != _parse_version(version_eq):
+            return False
+
+    if version_lt is not None:
+        if parsed >= _parse_version(version_lt):
+            return False
+
+    if version_gt is not None:
+        if parsed <= _parse_version(version_gt):
+            return False
+
+    return True
+
+
+def get_feedback_stats(
+    version_eq: Optional[str] = None,
+    version_lt: Optional[str] = None,
+    version_gt: Optional[str] = None,
+    config: Optional[Config] = None,
+) -> dict:
+    """Get feedback statistics for quality monitoring.
+
+    Args:
+        version_eq: Filter for feedback from exact version.
+        version_lt: Filter for feedback from versions less than this.
+        version_gt: Filter for feedback from versions greater than this.
+        config: Configuration to use.
+
+    Returns:
+        Dict with stats like avg_invocations, total_feedback, etc.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Build query with version filtering
+    # SQLite doesn't have good version comparison, so we filter in Python
+    has_version_filter = version_eq is not None or version_lt is not None or version_gt is not None
+
+    with get_db(config) as conn:
+        if has_version_filter:
+            # Fetch all feedback and filter in Python
+            cursor = conn.execute(
+                """
+                SELECT invocation_count, suggestion, version
+                FROM search_feedback
+                """
+            )
+            rows = cursor.fetchall()
+
+            # Filter by version
+            filtered_rows = [
+                row for row in rows
+                if _version_matches(row["version"], version_eq, version_lt, version_gt)
+            ]
+
+            if not filtered_rows:
+                return {
+                    "total_feedback": 0,
+                    "avg_invocations": 0,
+                    "min_invocations": 0,
+                    "max_invocations": 0,
+                    "with_suggestions": 0,
+                    "version_filter": {
+                        "eq": version_eq,
+                        "lt": version_lt,
+                        "gt": version_gt,
+                    },
+                }
+
+            invocations = [row["invocation_count"] for row in filtered_rows]
+            with_suggestions = sum(1 for row in filtered_rows if row["suggestion"] is not None)
+
+            return {
+                "total_feedback": len(filtered_rows),
+                "avg_invocations": round(sum(invocations) / len(invocations), 2),
+                "min_invocations": min(invocations),
+                "max_invocations": max(invocations),
+                "with_suggestions": with_suggestions,
+                "version_filter": {
+                    "eq": version_eq,
+                    "lt": version_lt,
+                    "gt": version_gt,
+                },
+            }
+        else:
+            cursor = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as total,
+                    AVG(invocation_count) as avg_invocations,
+                    MIN(invocation_count) as min_invocations,
+                    MAX(invocation_count) as max_invocations,
+                    SUM(CASE WHEN suggestion IS NOT NULL THEN 1 ELSE 0 END) as with_suggestions
+                FROM search_feedback
+                """
+            )
+            row = cursor.fetchone()
+
+            return {
+                "total_feedback": row["total"] or 0,
+                "avg_invocations": round(row["avg_invocations"], 2) if row["avg_invocations"] else 0,
+                "min_invocations": row["min_invocations"] or 0,
+                "max_invocations": row["max_invocations"] or 0,
+                "with_suggestions": row["with_suggestions"] or 0,
+            }

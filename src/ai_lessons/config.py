@@ -84,6 +84,7 @@ class Config:
     summaries: SummaryConfig = field(default_factory=SummaryConfig)
     tag_aliases: dict[str, str] = field(default_factory=dict)
     known_tags: list[str] = field(default_factory=list)
+    suggest_feedback: bool = True  # Show feedback reminder after commands
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":
@@ -134,6 +135,7 @@ class Config:
             summaries=summaries,
             tag_aliases=data.get("tag_aliases", {}),
             known_tags=data.get("known_tags", []),
+            suggest_feedback=data.get("suggest_feedback", True),
         )
 
     def save(self, config_path: Optional[Path] = None) -> None:
@@ -173,6 +175,10 @@ class Config:
             data["tag_aliases"] = self.tag_aliases
         if self.known_tags:
             data["known_tags"] = self.known_tags
+
+        # Only save suggest_feedback if explicitly set to False
+        if not self.suggest_feedback:
+            data["suggest_feedback"] = False
 
         with open(config_path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)

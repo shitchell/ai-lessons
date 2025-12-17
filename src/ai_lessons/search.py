@@ -1,5 +1,6 @@
 """Search functionality for ai-lessons."""
 
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ class SearchResult:
     resource_title: Optional[str] = None  # Parent resource title for chunks
     # Summary field (v4) - LLM-generated summary for chunks
     summary: Optional[str] = None
+    # Sections field (v5) - Headers within this chunk
+    sections: list[str] = None
 
     def __post_init__(self):
         if self.tags is None:
@@ -49,6 +52,8 @@ class SearchResult:
             self.anti_contexts = []
         if self.versions is None:
             self.versions = []
+        if self.sections is None:
+            self.sections = []
 
 
 def _normalize_text(text: str) -> str:
@@ -87,6 +92,111 @@ def _keyword_score(query: str, title: str, content: str) -> float:
     return score / len(query_terms)
 
 
+# --- v6: Improved Scoring Functions ---
+
+
+def _distance_to_score(distance: float, k: float = 6.0, center: float = 1.15) -> float:
+    """Convert cosine distance to score using sigmoid function.
+
+    This provides much better differentiation than 1/(1+d):
+    - Distances < 1.0: scores 0.7-0.95 (highly relevant)
+    - Distances 1.0-1.2: scores 0.4-0.7 (moderately relevant)
+    - Distances > 1.3: scores < 0.3 (less relevant)
+
+    Args:
+        distance: Cosine distance (0-2, lower is better)
+        k: Steepness of sigmoid curve (default 6.0)
+        center: Distance value that maps to 0.5 score (default 1.15)
+
+    Returns:
+        Score between 0 and 1
+    """
+    return 1.0 / (1.0 + math.exp(k * (distance - center)))
+
+
+def _keyword_score_with_tags(
+    query: str, title: str, content: str, tags: list[str]
+) -> float:
+    """Calculate keyword relevance score including tags.
+
+    Weights:
+    - Title matches: 3.0
+    - Tag matches: 2.5
+    - Content matches: 1.0
+
+    Args:
+        query: Search query
+        title: Result title
+        content: Result content (first 500 chars used)
+        tags: Result tags
+
+    Returns:
+        Raw keyword score (not normalized to 0-1)
+    """
+    query_terms = set(_normalize_text(query).split())
+    if not query_terms:
+        return 0.0
+
+    title_norm = _normalize_text(title)
+    content_norm = _normalize_text(content[:500])
+    tags_lower = {t.lower() for t in tags}
+
+    score = 0.0
+    for term in query_terms:
+        if term in title_norm:
+            score += 3.0
+        if term in tags_lower:
+            score += 2.5
+        if term in content_norm:
+            score += 1.0
+
+    return score / len(query_terms)
+
+
+def _compute_resource_score(
+    distance: float,
+    title: str,
+    content: str,
+    tags: list[str],
+    query: str,
+    version_score: float = 1.0,
+    chunk_boost: bool = False,
+) -> float:
+    """Compute score for a resource/chunk result.
+
+    Combines:
+    - Sigmoid-based distance score
+    - Keyword/tag boost
+    - Version score multiplier
+    - Optional chunk specificity boost
+
+    Args:
+        distance: Cosine distance
+        title: Resource title
+        content: Resource content
+        tags: Resource tags
+        query: Search query
+        version_score: Version match score (0-1)
+        chunk_boost: Apply chunk specificity boost
+
+    Returns:
+        Final score (0-1)
+    """
+    # Base score from distance
+    base = _distance_to_score(distance)
+
+    # Keyword boost (scaled to max 0.15)
+    kw_raw = _keyword_score_with_tags(query, title, content, tags)
+    kw_boost = min(0.15, kw_raw * 0.025)
+
+    # Chunk specificity boost
+    specificity_mult = 1.03 if chunk_boost else 1.0
+
+    # Combine
+    score = (base + kw_boost) * version_score * specificity_mult
+    return min(1.0, score)
+
+
 def vector_search(
     query: str,
     limit: int = 10,
@@ -115,7 +225,7 @@ def vector_search(
             source_filter,
         )
 
-        return [_row_to_result(conn, row, row["distance"]) for row in results]
+        return [_row_to_result(conn, row, row["distance"], query) for row in results]
 
 
 def keyword_search(
@@ -166,59 +276,41 @@ def hybrid_search(
 ) -> list[SearchResult]:
     """Search lessons using hybrid (semantic + keyword) ranking.
 
-    Uses reciprocal rank fusion to combine results from both methods.
+    Uses improved sigmoid-based scoring with keyword boosting.
+    The vector_search already includes keyword boosting in the score,
+    so we primarily use its results but may include additional results
+    from pure keyword matching.
     """
     if config is None:
         config = get_config()
 
-    # Get weights from config
-    semantic_weight = config.search.hybrid_weight_semantic
-    keyword_weight = config.search.hybrid_weight_keyword
-
-    # Get results from both methods (fetch more to allow fusion)
-    fetch_limit = limit * 3
-
+    # Get results from vector search (already uses improved scoring)
+    fetch_limit = limit * 2
     vector_results = vector_search(
         query, fetch_limit, tag_filter, context_filter,
         confidence_min, source_filter, config
     )
+
+    # Get keyword-only results for items that might be missed by vector search
     keyword_results = keyword_search(
         query, fetch_limit, tag_filter, context_filter,
         confidence_min, source_filter, config
     )
 
-    # Build rank maps
-    vector_ranks = {r.id: i + 1 for i, r in enumerate(vector_results)}
-    keyword_ranks = {r.id: i + 1 for i, r in enumerate(keyword_results)}
+    # Build result map - vector results take priority since they have better scores
+    result_map = {r.id: r for r in vector_results}
 
-    # Get all unique IDs
-    all_ids = set(vector_ranks.keys()) | set(keyword_ranks.keys())
+    # Add keyword results not in vector results (with scaled scores)
+    # Keyword-only matches are less reliable, so scale their scores down
+    for kr in keyword_results:
+        if kr.id not in result_map:
+            # Scale keyword score to 0-0.5 range since it lacks semantic signal
+            kr.score = min(0.5, kr.score * 0.1)
+            result_map[kr.id] = kr
 
-    # Calculate RRF scores
-    k = 60  # RRF constant
-    rrf_scores = {}
-    for lesson_id in all_ids:
-        score = 0.0
-        if lesson_id in vector_ranks:
-            score += semantic_weight / (k + vector_ranks[lesson_id])
-        if lesson_id in keyword_ranks:
-            score += keyword_weight / (k + keyword_ranks[lesson_id])
-        rrf_scores[lesson_id] = score
-
-    # Sort by RRF score
-    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
-
-    # Build result map for easy lookup
-    result_map = {r.id: r for r in vector_results + keyword_results}
-
-    # Return top results with RRF scores
-    results = []
-    for lesson_id in sorted_ids[:limit]:
-        result = result_map[lesson_id]
-        result.score = rrf_scores[lesson_id]
-        results.append(result)
-
-    return results
+    # Sort by score
+    results = sorted(result_map.values(), key=lambda x: x.score, reverse=True)
+    return results[:limit]
 
 
 def _execute_vector_search(
@@ -342,9 +434,19 @@ def _get_filtered_lessons(
 def _row_to_result(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
-    score: float,
+    score_or_distance: float,
+    query: str = "",
 ) -> SearchResult:
-    """Convert a database row to a SearchResult."""
+    """Convert a database row to a SearchResult.
+
+    Args:
+        conn: Database connection.
+        row: Database row.
+        score_or_distance: Either a precomputed score (from keyword search)
+            or a distance value (from vector search). If query is provided,
+            this is treated as distance and converted using sigmoid scoring.
+        query: Search query (if provided, enables improved scoring).
+    """
     lesson_id = row["id"]
 
     # Get tags
@@ -367,11 +469,22 @@ def _row_to_result(
         else:
             anti_contexts.append(r["context"])
 
+    # Compute score
+    if query:
+        # Use improved scoring: sigmoid distance + keyword boost
+        base_score = _distance_to_score(score_or_distance)
+        kw_raw = _keyword_score_with_tags(query, row["title"], row["content"], tags)
+        kw_boost = min(0.15, kw_raw * 0.025)
+        final_score = min(1.0, base_score + kw_boost)
+    else:
+        # Use precomputed score (from keyword search)
+        final_score = score_or_distance
+
     return SearchResult(
         id=lesson_id,
         title=row["title"],
         content=row["content"],
-        score=score,
+        score=final_score,
         result_type="lesson",
         confidence=row["confidence"],
         source=row["source"],
@@ -509,7 +622,7 @@ def search_resources(
         rows = cursor.fetchall()
 
         for row in rows:
-            result = _process_resource_row(conn, row, query_versions, tag_filter)
+            result = _process_resource_row(conn, row, query_versions, tag_filter, query)
             if result:
                 best_by_resource[result.id] = result
 
@@ -547,7 +660,7 @@ def search_resources(
             chunk_rows = cursor.fetchall()
 
             for chunk_row in chunk_rows:
-                result = _process_chunk_row(conn, chunk_row, query_versions)
+                result = _process_chunk_row(conn, chunk_row, query_versions, query)
                 if result:
                     resource_id = result.resource_id
                     # Keep better scoring result
@@ -565,6 +678,7 @@ def _process_resource_row(
     row: sqlite3.Row,
     query_versions: set[str],
     tag_filter: Optional[list[str]],
+    query: str = "",
 ) -> Optional[SearchResult]:
     """Process a resource row into a SearchResult."""
     # Get versions for this resource
@@ -586,9 +700,16 @@ def _process_resource_row(
     )
     tags = [r["tag"] for r in cursor.fetchall()]
 
-    # Calculate final score (lower distance = better, so invert)
-    base_score = 1.0 / (1.0 + row["distance"])
-    final_score = base_score * version_score
+    # Calculate final score using improved scoring
+    final_score = _compute_resource_score(
+        distance=row["distance"],
+        title=row["title"],
+        content=row["content"] or "",
+        tags=tags,
+        query=query,
+        version_score=version_score,
+        chunk_boost=False,
+    )
 
     return SearchResult(
         id=row["id"],
@@ -607,6 +728,7 @@ def _process_chunk_row(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
     query_versions: set[str],
+    query: str = "",
 ) -> Optional[SearchResult]:
     """Process a chunk row into a SearchResult."""
     resource_id = row["resource_id"]
@@ -630,18 +752,29 @@ def _process_chunk_row(
     )
     tags = [r["tag"] for r in cursor.fetchall()]
 
-    # Calculate final score (lower distance = better, so invert)
-    # Chunk matches get a small boost for specificity
-    base_score = 1.0 / (1.0 + row["distance"])
-    chunk_specificity_boost = 1.05  # 5% boost for chunk-level matches
-    final_score = base_score * version_score * chunk_specificity_boost
-
     # Build display title including breadcrumb
     display_title = row["resource_title"]
     if row["breadcrumb"]:
         display_title = f"{row['resource_title']} > {row['breadcrumb']}"
     elif row["title"]:
         display_title = f"{row['resource_title']} > {row['title']}"
+
+    # Calculate final score using improved scoring
+    final_score = _compute_resource_score(
+        distance=row["distance"],
+        title=display_title,
+        content=row["content"] or "",
+        tags=tags,
+        query=query,
+        version_score=version_score,
+        chunk_boost=True,  # Small boost for chunk-level matches
+    )
+
+    # Parse sections from JSON
+    sections = []
+    if row["sections"]:
+        import json
+        sections = json.loads(row["sections"])
 
     return SearchResult(
         id=row["id"],  # Chunk ID
@@ -660,6 +793,7 @@ def _process_chunk_row(
         resource_id=resource_id,
         resource_title=row["resource_title"],
         summary=row["summary"],
+        sections=sections,
     )
 
 
@@ -741,6 +875,10 @@ def unified_search(
             config=config,
         )
         all_results.extend(rule_results)
+
+    # Apply link boosting (lessons linked to high-scoring resources get boosted)
+    if include_lessons and include_resources:
+        all_results = _apply_link_boosting(all_results, config)
 
     # Apply context tag boosting
     if context_tags:
@@ -828,6 +966,64 @@ def search_rules(
 
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:limit]
+
+
+def _apply_link_boosting(
+    results: list[SearchResult],
+    config: Config,
+    link_boost_factor: float = 0.25,
+    min_linked_score: float = 0.65,
+) -> list[SearchResult]:
+    """Apply link-based score boosting to results.
+
+    If a lesson is linked to a resource that scored highly, boost the lesson's score.
+    This helps surface relevant lessons when their linked documentation is highly relevant.
+
+    Args:
+        results: Search results (mixed lessons, resources, chunks).
+        config: Configuration.
+        link_boost_factor: How much linked resource score boosts lesson (0-1).
+        min_linked_score: Minimum score for linked resource to trigger boost.
+            This prevents boosting from tangentially related linked resources.
+
+    Returns:
+        Results with link boosting applied to lessons.
+    """
+    # Build map of resource_id -> best score
+    resource_scores: dict[str, float] = {}
+    for result in results:
+        if result.result_type in ("resource", "chunk"):
+            rid = result.resource_id if result.result_type == "chunk" else result.id
+            if rid:
+                resource_scores[rid] = max(resource_scores.get(rid, 0), result.score)
+
+    # If no resources in results, nothing to boost with
+    if not resource_scores:
+        return results
+
+    # Get lesson -> linked resources mapping from database
+    with get_db(config) as conn:
+        for result in results:
+            if result.result_type == "lesson":
+                # Check for linked resources
+                cursor = conn.execute(
+                    "SELECT resource_id FROM lesson_links WHERE lesson_id = ?",
+                    (result.id,)
+                )
+                linked_resource_ids = [row["resource_id"] for row in cursor.fetchall()]
+
+                # Find best score from linked resources (only if above threshold)
+                best_linked_score = 0.0
+                for rid in linked_resource_ids:
+                    if rid in resource_scores and resource_scores[rid] >= min_linked_score:
+                        best_linked_score = max(best_linked_score, resource_scores[rid])
+
+                # Apply boost only if linked resource is highly relevant
+                if best_linked_score > 0:
+                    link_boost = best_linked_score * link_boost_factor
+                    result.score = min(1.0, result.score + link_boost)
+
+    return results
 
 
 def _apply_context_boosting(

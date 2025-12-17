@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -17,6 +18,21 @@ def _parse_tags(tags: Optional[str]) -> Optional[list[str]]:
     if not tags:
         return None
     return [t.strip() for t in tags.split(",") if t.strip()]
+
+
+def _show_feedback_reminder():
+    """Show a reminder to submit feedback after search commands."""
+    config = get_config()
+    if config.suggest_feedback:
+        click.echo()
+        click.secho(
+            "Tip: Help improve ai-lessons! When done searching, run:",
+            dim=True,
+        )
+        click.secho(
+            '  ai-lessons contribute feedback -t "your goal" -q "queries;used" -n <# of searches>',
+            dim=True,
+        )
 
 
 def _format_lesson(lesson: core.Lesson, verbose: bool = False) -> str:
@@ -75,6 +91,13 @@ def _format_search_result(result: SearchResult, verbose: bool = False) -> str:
             meta.append(f"parent: {result.resource_id[:12]}...")
         if meta:
             lines.append(f"  {' | '.join(meta)}")
+
+        # Show sections (headers within chunk)
+        if result.sections:
+            sections_str = ", ".join(result.sections[:4])
+            if len(result.sections) > 4:
+                sections_str += f" (+{len(result.sections) - 4} more)"
+            lines.append(f"  sections: {sections_str}")
 
         # Show summary or content preview for chunks (always, not just verbose)
         if result.summary:
@@ -647,6 +670,219 @@ def generate_summaries(
         click.echo(f"Encountered {errors} error(s).", err=True)
 
 
+@admin.command("update-paths")
+@click.option("--from", "from_path", required=True, help="Old path prefix")
+@click.option("--to", "to_path", required=True, help="New path prefix")
+@click.option("--dry-run", is_flag=True, help="Show what would be updated without making changes")
+def update_paths(from_path: str, to_path: str, dry_run: bool):
+    """Update resource paths after files move.
+
+    Updates both resource paths and link target paths when files are moved
+    or directories are renamed. Also attempts to resolve any previously
+    unresolved links that now match.
+
+    Examples:
+
+    \b
+      # Preview path updates
+      ai-lessons admin update-paths --from /old/docs --to /new/docs --dry-run
+
+    \b
+      # Apply path updates
+      ai-lessons admin update-paths --from /old/docs --to /new/docs
+    """
+    config = get_config()
+    core.ensure_initialized(config)
+
+    counts = core.update_resource_paths(from_path, to_path, dry_run=dry_run, config=config)
+
+    if dry_run:
+        click.echo("Dry run - would update:")
+    else:
+        click.echo("Updated:")
+
+    click.echo(f"  Resources: {counts['resources']}")
+    click.echo(f"  Links: {counts['links']}")
+
+    if counts["newly_resolved"] > 0:
+        click.echo(f"  Newly resolved links: {counts['newly_resolved']}")
+
+
+@admin.command("clear-resources")
+@click.option("--pattern", "-p", help="Filter by title (case-insensitive substring)")
+@click.option("--type", "-t", "resource_type", type=click.Choice(["doc", "script"]),
+              help="Filter by resource type")
+@click.option("--version", "-v", help="Filter by version")
+@click.option("--tags", help="Filter by tags (comma-separated, matches any)")
+@click.option("--all", "clear_all", is_flag=True, help="Clear ALL resources (required if no filters)")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted without making changes")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def clear_resources(
+    pattern: Optional[str],
+    resource_type: Optional[str],
+    version: Optional[str],
+    tags: Optional[str],
+    clear_all: bool,
+    dry_run: bool,
+    yes: bool,
+):
+    """Clear resources from the database.
+
+    Requires either filters or --all flag for safety.
+
+    \b
+    Examples:
+      # Clear all resources (requires --all)
+      ai-lessons admin clear-resources --all
+
+    \b
+      # Clear only v2 docs
+      ai-lessons admin clear-resources --version v2 --type doc
+
+    \b
+      # Preview what would be deleted
+      ai-lessons admin clear-resources --tags test --dry-run
+    """
+    from .db import get_db
+
+    # Safety check: require filters or --all
+    has_filters = any([pattern, resource_type, version, tags])
+    if not has_filters and not clear_all:
+        click.echo("Error: No filters provided. Use --all to clear all resources, or specify filters.", err=True)
+        click.echo("  Filters: --pattern, --type, --version, --tags", err=True)
+        sys.exit(1)
+
+    config = get_config()
+    core.ensure_initialized(config)
+
+    tag_list = _parse_tags(tags)
+
+    # Find matching resources
+    resources = core.list_resources(
+        pattern=pattern,
+        resource_type=resource_type,
+        version=version,
+        tags=tag_list,
+        config=config,
+    )
+
+    if not resources:
+        click.echo("No resources match the specified filters.")
+        return
+
+    click.echo(f"{'Would delete' if dry_run else 'Will delete'} {len(resources)} resource(s):")
+    for resource in resources[:10]:
+        click.echo(f"  [{resource.id[:12]}...] {resource.title}")
+    if len(resources) > 10:
+        click.echo(f"  ... and {len(resources) - 10} more")
+
+    if dry_run:
+        return
+
+    # Confirm deletion
+    if not yes:
+        if not click.confirm("Are you sure you want to delete these resources?"):
+            click.echo("Aborted.")
+            return
+
+    # Delete resources
+    deleted = 0
+    with get_db(config) as conn:
+        for resource in resources:
+            # Delete in correct order for foreign keys
+            conn.execute("DELETE FROM resource_links WHERE from_resource_id = ?", (resource.id,))
+            conn.execute("DELETE FROM resource_links WHERE resolved_resource_id = ?", (resource.id,))
+
+            cursor = conn.execute("SELECT id FROM resource_chunks WHERE resource_id = ?", (resource.id,))
+            chunk_ids = [row["id"] for row in cursor.fetchall()]
+            for chunk_id in chunk_ids:
+                conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
+
+            conn.execute("DELETE FROM resource_chunks WHERE resource_id = ?", (resource.id,))
+            conn.execute("DELETE FROM resource_embeddings WHERE resource_id = ?", (resource.id,))
+            conn.execute("DELETE FROM resource_versions WHERE resource_id = ?", (resource.id,))
+            conn.execute("DELETE FROM resource_tags WHERE resource_id = ?", (resource.id,))
+            conn.execute("DELETE FROM resources WHERE id = ?", (resource.id,))
+            deleted += 1
+
+        conn.commit()
+
+    click.echo(f"Deleted {deleted} resource(s).")
+
+
+@admin.command("feedback-stats")
+@click.option("--list", "-l", "list_entries", is_flag=True, help="List recent feedback entries")
+@click.option("--limit", "-n", default=20, help="Number of entries to list (default 20)")
+@click.option("--version-eq", help="Filter by exact version (e.g., 0.1.0)")
+@click.option("--version-lt", help="Filter by versions less than (e.g., 0.2.0)")
+@click.option("--version-gt", help="Filter by versions greater than (e.g., 0.1.0)")
+def feedback_stats(
+    list_entries: bool,
+    limit: int,
+    version_eq: Optional[str],
+    version_lt: Optional[str],
+    version_gt: Optional[str],
+):
+    """View feedback statistics for quality monitoring.
+
+    Shows aggregate statistics about search quality feedback.
+    Use --list to see individual feedback entries.
+
+    Version filtering examples:
+      --version-eq 0.1.0     Filter for exactly version 0.1.0
+      --version-gt 0.1.0     Filter for versions > 0.1.0
+      --version-lt 0.2.0     Filter for versions < 0.2.0
+
+    Combine filters to create ranges:
+      --version-gt 0.1.0 --version-lt 0.3.0   Versions between 0.1.0 and 0.3.0
+    """
+    stats = core.get_feedback_stats(
+        version_eq=version_eq,
+        version_lt=version_lt,
+        version_gt=version_gt,
+    )
+
+    click.echo("Search Feedback Statistics")
+    click.echo("=" * 40)
+
+    # Show version filter if applied
+    if "version_filter" in stats:
+        vf = stats["version_filter"]
+        filters = []
+        if vf.get("eq"):
+            filters.append(f"= {vf['eq']}")
+        if vf.get("gt"):
+            filters.append(f"> {vf['gt']}")
+        if vf.get("lt"):
+            filters.append(f"< {vf['lt']}")
+        if filters:
+            click.echo(f"Version filter: {', '.join(filters)}")
+            click.echo()
+
+    click.echo(f"Total feedback entries: {stats['total_feedback']}")
+
+    if stats['total_feedback'] > 0:
+        click.echo(f"Average invocations: {stats['avg_invocations']}")
+        click.echo(f"Min invocations: {stats['min_invocations']}")
+        click.echo(f"Max invocations: {stats['max_invocations']}")
+        click.echo(f"Entries with suggestions: {stats['with_suggestions']}")
+
+    if list_entries:
+        entries = core.list_feedback(limit=limit)
+        if entries:
+            click.echo()
+            click.echo(f"Recent Feedback (last {len(entries)}):")
+            click.echo("-" * 40)
+            for entry in entries:
+                version_str = f" v{entry.version}" if entry.version else ""
+                click.echo(f"#{entry.id} [{entry.created_at[:10]}]{version_str} {entry.invocation_count} invocations")
+                click.echo(f"  Task: {entry.task}")
+                click.echo(f"  Queries: {'; '.join(entry.queries)}")
+                if entry.suggestion:
+                    click.echo(f"  Suggestion: {entry.suggestion}")
+                click.echo()
+
+
 # =============================================================================
 # CONTRIBUTE group - Add and modify lessons, resources, and rules
 # =============================================================================
@@ -666,6 +902,7 @@ def contribute():
 @click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
 @click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
 @click.option("--source-notes", help="Notes about the source")
+@click.option("--link-resource", "linked_resources", multiple=True, help="Resource ID to link (can specify multiple)")
 def add(
     title: str,
     content: Optional[str],
@@ -675,6 +912,7 @@ def add(
     confidence: Optional[str],
     source: Optional[str],
     source_notes: Optional[str],
+    linked_resources: tuple,
 ):
     """Add a new lesson."""
     # Read content from stdin if not provided
@@ -687,6 +925,13 @@ def add(
         click.echo("Error: Content is required", err=True)
         sys.exit(1)
 
+    # Verify linked resources exist before creating lesson
+    for resource_id in linked_resources:
+        resource = core.get_resource(resource_id)
+        if not resource:
+            click.echo(f"Error: Resource not found: {resource_id}", err=True)
+            sys.exit(1)
+
     lesson_id = core.add_lesson(
         title=title,
         content=content,
@@ -698,7 +943,13 @@ def add(
         source_notes=source_notes,
     )
 
+    # Create links to resources
+    for resource_id in linked_resources:
+        core.link_lesson_to_resource(lesson_id, resource_id)
+
     click.echo(f"Added lesson: {lesson_id}")
+    if linked_resources:
+        click.echo(f"  Linked to {len(linked_resources)} resource(s)")
 
 
 @contribute.command()
@@ -775,14 +1026,131 @@ def unlink(from_id: str, to_id: str, relation: Optional[str]):
     click.echo(f"Removed {count} link(s)")
 
 
+@contribute.command("link-resource")
+@click.argument("lesson_id")
+@click.argument("resource_id")
+@click.option("--relation", "-r", default="related_to", help="Relationship type (default: related_to)")
+def link_resource(lesson_id: str, resource_id: str, relation: str):
+    """Link a lesson to a resource.
+
+    Creates a connection between a lesson and a resource document/script.
+    This allows related documentation to be surfaced alongside lessons.
+    """
+    # Verify lesson exists
+    lesson = core.get_lesson(lesson_id)
+    if not lesson:
+        click.echo(f"Lesson not found: {lesson_id}", err=True)
+        sys.exit(1)
+
+    # Verify resource exists
+    resource = core.get_resource(resource_id)
+    if not resource:
+        click.echo(f"Resource not found: {resource_id}", err=True)
+        sys.exit(1)
+
+    success = core.link_lesson_to_resource(lesson_id, resource_id, relation)
+
+    if success:
+        click.echo(f"Linked lesson \"{lesson.title}\" --[{relation}]--> resource \"{resource.title}\"")
+    else:
+        click.echo("Link already exists.", err=True)
+        sys.exit(1)
+
+
+@contribute.command("unlink-resource")
+@click.argument("lesson_id")
+@click.argument("resource_id")
+def unlink_resource(lesson_id: str, resource_id: str):
+    """Remove a link between a lesson and a resource."""
+    success = core.unlink_lesson_from_resource(lesson_id, resource_id)
+
+    if success:
+        click.echo(f"Unlinked lesson {lesson_id} from resource {resource_id}")
+    else:
+        click.echo("Link not found.", err=True)
+        sys.exit(1)
+
+
 # --- Resource commands ---
 
 
+def _get_git_root(path: Path) -> Optional[Path]:
+    """Get the git repository root for a path, if it's in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def _find_common_ancestor(paths: list[Path]) -> Path:
+    """Find the highest-level shared directory among paths."""
+    if len(paths) == 1:
+        return paths[0].parent
+
+    # Get all parts for each path
+    all_parts = [p.resolve().parts for p in paths]
+
+    # Find common prefix
+    common_parts = []
+    for parts in zip(*all_parts):
+        if len(set(parts)) == 1:
+            common_parts.append(parts[0])
+        else:
+            break
+
+    if common_parts:
+        return Path(*common_parts)
+    return Path("/")
+
+
+def _determine_root_dir(paths: list[Path], explicit_root: Optional[str]) -> Path:
+    """Determine the root directory for title generation.
+
+    Priority:
+    1. Explicit --root if provided
+    2. Git repo root (if first file is in a git repo)
+    3. Common ancestor directory (multiple files)
+    4. Parent directory (single file)
+    """
+    if explicit_root:
+        return Path(explicit_root).resolve()
+
+    # Try git root from first file
+    git_root = _get_git_root(paths[0])
+    if git_root:
+        return git_root
+
+    # Fall back to common ancestor or parent
+    return _find_common_ancestor(paths)
+
+
+def _generate_title(path: Path, root_dir: Path) -> str:
+    """Generate a title from a path relative to root_dir.
+
+    Title format: root_dir.name / relative_path
+    Example: jira-cloud-rest-api/v3/Apis/IssueVotesApi.md
+    """
+    abs_path = path.resolve()
+    try:
+        relative = abs_path.relative_to(root_dir)
+        return f"{root_dir.name}/{relative}"
+    except ValueError:
+        # Path is not under root_dir, use filename
+        return abs_path.name
+
+
 @contribute.command("add-resource")
+@click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--type", "-t", "resource_type", required=True, type=click.Choice(["doc", "script"]),
               help="Resource type")
-@click.option("--path", "-p", required=True, help="Filesystem path to the resource")
-@click.option("--title", required=True, help="Resource title")
+@click.option("--root", "-r", "root_dir", type=click.Path(exists=True),
+              help="Root directory for title generation (default: git root or common ancestor)")
 @click.option("--version", "versions", multiple=True, help="Version(s) this resource applies to")
 @click.option("--tags", help="Comma-separated tags")
 # Chunking options
@@ -793,12 +1161,12 @@ def unlink(from_id: str, to_id: str, relation: Optional[str]):
 @click.option("--chunk-header-levels", default="2,3",
               help="Header levels to split on, comma-separated (default: 2,3)")
 @click.option("--chunk-delimiter", help="Custom delimiter pattern (regex)")
-@click.option("--preview", is_flag=True, help="Preview chunking without storing")
+@click.option("--preview", is_flag=True, help="Preview chunking for first file without storing")
 @click.option("--generate-summaries", is_flag=True, help="Generate LLM summaries for chunks (requires summaries config)")
 def add_resource(
+    paths: tuple,
     resource_type: str,
-    path: str,
-    title: str,
+    root_dir: Optional[str],
     versions: tuple,
     tags: Optional[str],
     chunk_strategy: str,
@@ -809,19 +1177,37 @@ def add_resource(
     preview: bool,
     generate_summaries: bool,
 ):
-    """Add a doc or script resource.
+    """Add doc or script resource(s).
+
+    Titles are auto-generated from the file path relative to the root directory.
+    The root directory is determined by: --root flag > git repo root > common ancestor.
+
+    \b
+    Examples:
+      # Import a single doc (title: jira-cloud-rest-api/v3/Apis/IssueVotesApi.md)
+      ai-lessons contribute add-resource -t doc v3/Apis/IssueVotesApi.md --version v3
+
+    \b
+      # Import multiple docs with glob
+      ai-lessons contribute add-resource -t doc v3/Apis/*.md --version v3 --tags api,jira
+
+    \b
+      # Import with explicit root
+      ai-lessons contribute add-resource -t doc --root /path/to/project src/**/*.py
+
+    \b
+      # Preview chunking before import
+      ai-lessons contribute add-resource -t doc myfile.md --preview
 
     For documents, content is automatically chunked for better search.
-    Use --preview to see how a document will be chunked before adding.
     """
-    from pathlib import Path
     from .chunking import ChunkingConfig, chunk_document
 
-    # Validate path exists
-    path_obj = Path(path)
-    if not path_obj.exists():
-        click.echo(f"Error: Path does not exist: {path}", err=True)
-        sys.exit(1)
+    # Convert to Path objects
+    path_objs = [Path(p) for p in paths]
+
+    # Determine root directory for title generation
+    root = _determine_root_dir(path_objs, root_dir)
 
     # Build chunking config
     header_levels = [int(x.strip()) for x in chunk_header_levels.split(",") if x.strip()]
@@ -833,48 +1219,79 @@ def add_resource(
         delimiter_pattern=chunk_delimiter,
     )
 
-    # For preview or doc type, run chunking
-    if preview or resource_type == "doc":
+    # Preview mode - just show first file
+    if preview:
+        path_obj = path_objs[0]
         content = path_obj.read_text()
-        result = chunk_document(content, chunking_config, source_path=path)
+        result = chunk_document(content, chunking_config, source_path=str(path_obj))
+        title = _generate_title(path_obj, root)
+        click.echo(f"Preview for: {title}")
+        click.echo(f"  Root: {root}")
+        click.echo()
+        _display_chunking_preview(result)
+        return
 
-        if preview:
-            _display_chunking_preview(result)
-            return
+    # Process each file
+    total_chunks = 0
+    all_warnings = []
+    added_ids = []
 
-    resource_id = core.add_resource(
-        type=resource_type,
-        title=title,
-        path=path,
-        versions=list(versions) if versions else None,
-        tags=_parse_tags(tags),
-        chunking_config=chunking_config if resource_type == "doc" else None,
-    )
+    for path_obj in path_objs:
+        title = _generate_title(path_obj, root)
+        path_str = str(path_obj.resolve())
 
-    click.echo(f"Added {resource_type}: {resource_id}")
+        # For doc type, run chunking to get stats
+        result = None
+        if resource_type == "doc":
+            content = path_obj.read_text()
+            result = chunk_document(content, chunking_config, source_path=path_str)
+
+        resource_id = core.add_resource(
+            type=resource_type,
+            title=title,
+            path=path_str,
+            versions=list(versions) if versions else None,
+            tags=_parse_tags(tags),
+            chunking_config=chunking_config if resource_type == "doc" else None,
+        )
+
+        added_ids.append(resource_id)
+
+        if result:
+            total_chunks += len(result.chunks)
+            all_warnings.extend(result.warnings)
+
+        click.echo(f"Added: {resource_id[:12]}... {title}")
+
+    # Summary
+    click.echo()
+    click.echo(f"Added {len(added_ids)} {resource_type}(s)")
     if resource_type == "doc":
-        click.echo(f"  Chunks: {len(result.chunks)}")
-        if result.warnings:
-            for warning in result.warnings:
-                click.echo(f"  Warning: {warning}")
+        click.echo(f"  Total chunks: {total_chunks}")
+        if all_warnings:
+            click.echo(f"  Warnings: {len(all_warnings)}")
 
         # Generate summaries if requested
         if generate_summaries:
             config = get_config()
             if not config.summaries.enabled:
                 click.echo("  Warning: --generate-summaries specified but summaries not configured.", err=True)
-                click.echo("  Add 'summaries' section to config.yaml to enable.", err=True)
+                click.echo("  Tip: Add 'summaries' section to config.yaml to enable.", err=True)
             else:
                 click.echo("  Generating summaries...")
                 from .summaries import generate_chunk_summaries
-                try:
-                    summaries = generate_chunk_summaries(resource_id=resource_id, config=config)
-                    click.echo(f"  Generated {len(summaries)} summary/summaries.")
-                except Exception as e:
-                    click.echo(f"  Warning: Failed to generate summaries: {e}", err=True)
+                total_summaries = 0
+                for resource_id in added_ids:
+                    try:
+                        summaries = generate_chunk_summaries(resource_id=resource_id, config=config)
+                        total_summaries += len(summaries)
+                    except Exception as e:
+                        click.echo(f"  Warning: Failed for {resource_id[:12]}...: {e}", err=True)
+                click.echo(f"  Generated {total_summaries} summaries.")
         else:
-            # Show tip about using --generate-summaries
-            click.echo("  Tip: Use --generate-summaries to create searchable summaries for chunks.")
+            config = get_config()
+            if config.summaries.enabled:
+                click.echo("  Tip: Use --generate-summaries to create searchable summaries.")
 
 
 @contribute.command("refresh-resource")
@@ -946,6 +1363,49 @@ def suggest_rule(
     click.echo("Note: Rule requires approval before it will appear in search results.")
 
 
+@contribute.command()
+@click.option("--task", "-t", required=True, help="Brief description of what you were trying to find")
+@click.option("--queries", "-q", required=True, help="Semicolon-separated list of queries used")
+@click.option("--invocation-count", "-n", required=True, type=int, help="Number of ai-lessons invocations needed")
+@click.option("--suggestion", "-s", help="Optional feedback or suggestions for the tool")
+def feedback(task: str, queries: str, invocation_count: int, suggestion: Optional[str]):
+    """Submit feedback on search quality.
+
+    Help us improve ai-lessons by recording how well the search worked for you.
+
+    Examples:
+
+        ai-lessons contribute feedback -t "find jira vote API docs" -q "jira vote;vote on issue" -n 2
+
+        ai-lessons contribute feedback -t "workflow status info" -q "workflow;transitions" -n 4 -s "missing workflow docs"
+    """
+    # Parse queries from semicolon-separated string
+    query_list = [q.strip() for q in queries.split(";") if q.strip()]
+
+    if not query_list:
+        click.echo("Error: At least one query is required", err=True)
+        sys.exit(1)
+
+    if invocation_count < 1:
+        click.echo("Error: Invocation count must be at least 1", err=True)
+        sys.exit(1)
+
+    feedback_id = core.add_feedback(
+        task=task,
+        queries=query_list,
+        invocation_count=invocation_count,
+        suggestion=suggestion,
+    )
+
+    click.echo(f"Recorded feedback #{feedback_id}")
+    click.echo(f"  Task: {task}")
+    click.echo(f"  Queries: {', '.join(query_list)}")
+    click.echo(f"  Invocations: {invocation_count}")
+    if suggestion:
+        click.echo(f"  Suggestion: {suggestion}")
+    click.echo("Thank you for helping improve ai-lessons!")
+
+
 # =============================================================================
 # RECALL group - Search and view lessons
 # =============================================================================
@@ -954,6 +1414,12 @@ def suggest_rule(
 def recall():
     """Search and view lessons."""
     pass
+
+
+@recall.result_callback()
+def _after_recall_command(*args, **kwargs):
+    """Show feedback reminder after any recall command."""
+    _show_feedback_reminder()
 
 
 @recall.command()
@@ -1129,6 +1595,70 @@ def show_chunk(chunk_id: str):
         sys.exit(1)
 
     click.echo(_format_chunk(chunk, verbose=True))
+
+    # Show linked resources
+    links = core.get_chunk_links(chunk_id)
+    if links:
+        click.echo()
+        click.echo("---")
+        click.echo("Linked resources:")
+        for link in links:
+            if link.resolved_resource_id:
+                resource = core.get_resource(link.resolved_resource_id)
+                if resource:
+                    target = f"[{link.resolved_resource_id[:12]}...] {resource.title}"
+                else:
+                    target = f"[{link.resolved_resource_id[:12]}...] (deleted)"
+            else:
+                target = "(not imported)"
+
+            # Show original link syntax
+            fragment = f"#{link.to_fragment}" if link.to_fragment else ""
+            click.echo(f"  [{link.link_text}](...{fragment}) -> {target}")
+
+
+@recall.command("related")
+@click.argument("resource_id")
+def show_related(resource_id: str):
+    """Show resources related to the given resource via links.
+
+    Displays both outgoing links (from this resource) and incoming links
+    (to this resource from other resources).
+    """
+    resource = core.get_resource(resource_id)
+
+    if resource is None:
+        click.echo(f"Resource not found: {resource_id}", err=True)
+        sys.exit(1)
+
+    outgoing, incoming = core.get_related_resources(resource_id)
+
+    click.echo(f"Links from \"{resource.title}\":")
+    if outgoing:
+        for link in outgoing:
+            if link.resolved_resource_id:
+                target = core.get_resource(link.resolved_resource_id)
+                if target:
+                    click.echo(f"  -> [{link.resolved_resource_id[:12]}...] {target.title}")
+                else:
+                    click.echo(f"  -> [{link.resolved_resource_id[:12]}...] (deleted)")
+            else:
+                # Show path for unresolved links
+                click.echo(f"  -> {link.to_path} (not imported)")
+    else:
+        click.echo("  (none)")
+
+    click.echo()
+    click.echo(f"Links to \"{resource.title}\":")
+    if incoming:
+        for link in incoming:
+            source = core.get_resource(link.from_resource_id)
+            if source:
+                click.echo(f"  <- [{link.from_resource_id[:12]}...] {source.title}")
+            else:
+                click.echo(f"  <- [{link.from_resource_id[:12]}...] (deleted)")
+    else:
+        click.echo("  (none)")
 
 
 @recall.command("list-resources")
