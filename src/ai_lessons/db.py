@@ -343,11 +343,13 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
             """)
             conn.execute("DROP TABLE lesson_links")
 
-        # 4. Create resource_anchors table
+        # 4. Create resource_anchors table (FK to edges_new, will be valid after rename)
+        # Note: We create this with no FK, then drop/recreate after rename to avoid
+        # SQLite's FK reference issues when renaming tables
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS resource_anchors (
+            CREATE TABLE IF NOT EXISTS resource_anchors_temp (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                edge_id INTEGER REFERENCES edges_new(id) ON DELETE CASCADE,
+                edge_id INTEGER NOT NULL,
                 to_path TEXT NOT NULL,
                 to_fragment TEXT,
                 link_text TEXT
@@ -398,7 +400,7 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
                 if edge_row:
                     # Insert anchor metadata
                     conn.execute("""
-                        INSERT INTO resource_anchors (edge_id, to_path, to_fragment, link_text)
+                        INSERT INTO resource_anchors_temp (edge_id, to_path, to_fragment, link_text)
                         VALUES (?, ?, ?, ?)
                     """, (edge_row["id"], row["to_path"], row["to_fragment"], row["link_text"]))
 
@@ -408,7 +410,25 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
         conn.execute("DROP TABLE IF EXISTS edges")
         conn.execute("ALTER TABLE edges_new RENAME TO edges")
 
-        # 7. Create indexes
+        # 7. Create final resource_anchors table with proper FK to edges
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resource_anchors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                edge_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+                to_path TEXT NOT NULL,
+                to_fragment TEXT,
+                link_text TEXT
+            )
+        """)
+
+        # 8. Migrate data from temp table
+        conn.execute("""
+            INSERT INTO resource_anchors (id, edge_id, to_path, to_fragment, link_text)
+            SELECT id, edge_id, to_path, to_fragment, link_text FROM resource_anchors_temp
+        """)
+        conn.execute("DROP TABLE IF EXISTS resource_anchors_temp")
+
+        # 9. Create indexes
         conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id, from_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id, to_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation)")
