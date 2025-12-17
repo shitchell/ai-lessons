@@ -22,7 +22,7 @@ pip install ai-lessons[all]
 ai-lessons admin init
 
 # Add your first lesson
-ai-lessons learn add \
+ai-lessons contribute add \
   --title "Always GET before PUT on Jira workflows" \
   --content "PUT /workflows deletes any statuses not included in the payload" \
   --tags jira,api,gotcha \
@@ -91,13 +91,20 @@ ai-lessons admin merge-tags A B    # Merge tag A into B
 ai-lessons admin add-source NAME   # Add new source type
 ```
 
-### `learn` - Create and modify
+### `contribute` - Add and modify
 ```bash
-ai-lessons learn add --title "..." --content "..." --tags a,b
-ai-lessons learn update ID --confidence high
-ai-lessons learn delete ID
-ai-lessons learn link ID1 ID2 --relation derived_from
-ai-lessons learn unlink ID1 ID2
+# Add lessons
+ai-lessons contribute add --title "..." --content "..." --tags a,b
+ai-lessons contribute update ID --confidence high
+ai-lessons contribute delete ID
+ai-lessons contribute link ID1 ID2 --relation derived_from
+
+# Add resources (docs and scripts)
+ai-lessons contribute add-resource --type doc --path docs/api.md --title "API Docs" --version v3
+ai-lessons contribute add-resource --type script --path scripts/deploy.sh --title "Deploy Script"
+
+# Preview how a document will be chunked
+ai-lessons contribute add-resource --type doc --path docs/guide.md --title "Guide" --preview
 ```
 
 ### `recall` - Search and view
@@ -136,6 +143,16 @@ A lesson has:
 - **Contexts** - When this applies / doesn't apply
 - **Confidence** - very-low, low, medium, high, very-high
 - **Source** - How you know this (tested, documented, inferred, observed, hearsay)
+
+### Resources
+Resources are documents and scripts that complement lessons:
+
+- **Docs** - Markdown/text documents, automatically chunked for better search
+- **Scripts** - Executable files that can be run via the MCP server
+
+Documents are split into chunks at logical boundaries (headers, delimiters) so searches can find specific sections within large documents. Use `--preview` to see how a document will be chunked before adding.
+
+See [Contributing Resources](docs/contributing/resources/README.md) for detailed documentation on chunking strategies and best practices.
 
 ### Confidence Levels
 | Level | Meaning |

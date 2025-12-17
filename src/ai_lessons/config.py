@@ -57,11 +57,31 @@ class SearchConfig:
 
 
 @dataclass
+class SummaryConfig:
+    """LLM summary generation configuration."""
+    backend: Optional[str] = None  # "anthropic", "openai", or None (disabled)
+    model: Optional[str] = None  # e.g., "claude-3-haiku-20240307", "gpt-4o-mini"
+    api_key: Optional[str] = None
+
+    def __post_init__(self):
+        # Resolve environment variables in api_key
+        if self.api_key and self.api_key.startswith("${") and self.api_key.endswith("}"):
+            env_var = self.api_key[2:-1]
+            self.api_key = os.environ.get(env_var)
+
+    @property
+    def enabled(self) -> bool:
+        """Check if summary generation is configured."""
+        return bool(self.backend and self.model)
+
+
+@dataclass
 class Config:
     """Main configuration."""
     db_path: Path = DEFAULT_DB_PATH
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    summaries: SummaryConfig = field(default_factory=SummaryConfig)
     tag_aliases: dict[str, str] = field(default_factory=dict)
     known_tags: list[str] = field(default_factory=list)
 
@@ -94,6 +114,14 @@ class Config:
             hybrid_weight_keyword=search_data.get("hybrid_weight_keyword", 0.3),
         )
 
+        # Parse summaries config
+        summaries_data = data.get("summaries", {})
+        summaries = SummaryConfig(
+            backend=summaries_data.get("backend"),
+            model=summaries_data.get("model"),
+            api_key=summaries_data.get("api_key"),
+        )
+
         # Parse db_path if specified
         db_path = DEFAULT_DB_PATH
         if "db_path" in data:
@@ -103,6 +131,7 @@ class Config:
             db_path=db_path,
             embedding=embedding,
             search=search,
+            summaries=summaries,
             tag_aliases=data.get("tag_aliases", {}),
             known_tags=data.get("known_tags", []),
         )
@@ -130,6 +159,16 @@ class Config:
             data["embedding"]["api_key"] = self.embedding.api_key
         if self.embedding.dimensions:
             data["embedding"]["dimensions"] = self.embedding.dimensions
+
+        # Add summaries config if configured
+        if self.summaries.enabled:
+            data["summaries"] = {
+                "backend": self.summaries.backend,
+                "model": self.summaries.model,
+            }
+            if self.summaries.api_key:
+                data["summaries"]["api_key"] = self.summaries.api_key
+
         if self.tag_aliases:
             data["tag_aliases"] = self.tag_aliases
         if self.known_tags:

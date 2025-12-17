@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import subprocess
 from typing import Any, Optional
 
 from mcp.server import Server
@@ -11,6 +12,7 @@ from mcp.types import TextContent, Tool
 from . import core
 from .config import get_config
 from .db import init_db
+from .search import search_resources, unified_search
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,18 +39,85 @@ def _lesson_to_dict(lesson: core.Lesson) -> dict:
     }
 
 
-def _search_result_to_dict(result: core.search.SearchResult) -> dict:
+def _search_result_to_dict(result) -> dict:
     """Convert a SearchResult to a dictionary for JSON serialization."""
-    return {
+    base = {
         "id": result.id,
         "title": result.title,
         "content": result.content,
         "score": result.score,
-        "confidence": result.confidence,
-        "source": result.source,
+        "result_type": result.result_type,
         "tags": result.tags,
-        "contexts": result.contexts,
-        "anti_contexts": result.anti_contexts,
+    }
+
+    # Add type-specific fields
+    if result.result_type == "lesson":
+        base.update({
+            "confidence": result.confidence,
+            "source": result.source,
+            "contexts": result.contexts,
+            "anti_contexts": result.anti_contexts,
+        })
+    elif result.result_type == "resource":
+        base.update({
+            "resource_type": result.resource_type,
+            "versions": result.versions,
+            "path": result.path,
+        })
+    elif result.result_type == "chunk":
+        base.update({
+            "resource_type": result.resource_type,
+            "versions": result.versions,
+            "path": result.path,
+            "chunk_id": result.chunk_id,
+            "chunk_index": result.chunk_index,
+            "chunk_breadcrumb": result.chunk_breadcrumb,
+            "resource_id": result.resource_id,
+            "resource_title": result.resource_title,
+        })
+    elif result.result_type == "rule":
+        base.update({
+            "rationale": result.rationale,
+            "approved": result.approved,
+        })
+
+    return base
+
+
+def _resource_to_dict(resource: core.Resource) -> dict:
+    """Convert a Resource to a dictionary for JSON serialization."""
+    return {
+        "id": resource.id,
+        "type": resource.type,
+        "title": resource.title,
+        "path": resource.path,
+        "content": resource.content,
+        "content_hash": resource.content_hash,
+        "source_ref": resource.source_ref,
+        "versions": resource.versions,
+        "tags": resource.tags,
+        "indexed_at": str(resource.indexed_at) if resource.indexed_at else None,
+        "created_at": str(resource.created_at) if resource.created_at else None,
+        "updated_at": str(resource.updated_at) if resource.updated_at else None,
+    }
+
+
+def _rule_to_dict(rule: core.Rule) -> dict:
+    """Convert a Rule to a dictionary for JSON serialization."""
+    return {
+        "id": rule.id,
+        "title": rule.title,
+        "content": rule.content,
+        "rationale": rule.rationale,
+        "approved": rule.approved,
+        "approved_at": str(rule.approved_at) if rule.approved_at else None,
+        "approved_by": rule.approved_by,
+        "suggested_by": rule.suggested_by,
+        "tags": rule.tags,
+        "linked_lessons": rule.linked_lessons,
+        "linked_resources": rule.linked_resources,
+        "created_at": str(rule.created_at) if rule.created_at else None,
+        "updated_at": str(rule.updated_at) if rule.updated_at else None,
     }
 
 
@@ -274,6 +343,259 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # --- Resource tools ---
+        Tool(
+            name="add_resource",
+            description="Add a doc or script resource with optional chunking. Docs are automatically chunked for better search. Use preview=true to see chunking results without storing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["doc", "script"],
+                        "description": "Resource type",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Filesystem path to the resource",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Resource title",
+                    },
+                    "versions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Version(s) this resource applies to (e.g., ['v2', 'v3'])",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags for categorization",
+                    },
+                    "chunking": {
+                        "type": "object",
+                        "description": "Chunking configuration (docs only)",
+                        "properties": {
+                            "strategy": {
+                                "type": "string",
+                                "enum": ["auto", "headers", "delimiter", "fixed", "none"],
+                                "description": "Chunking strategy (default: auto)",
+                            },
+                            "min_size": {
+                                "type": "integer",
+                                "description": "Minimum chunk size in tokens (default: 100)",
+                            },
+                            "max_size": {
+                                "type": "integer",
+                                "description": "Maximum chunk size in tokens (default: 800)",
+                            },
+                            "header_levels": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "Header levels to split on (default: [2, 3])",
+                            },
+                            "delimiter_pattern": {
+                                "type": "string",
+                                "description": "Regex pattern for delimiter-based chunking",
+                            },
+                        },
+                    },
+                    "preview": {
+                        "type": "boolean",
+                        "description": "If true, return chunking preview without storing",
+                    },
+                },
+                "required": ["type", "path", "title"],
+            },
+        ),
+        Tool(
+            name="search_resources",
+            description="Search for docs and scripts with semantic search and version filtering.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["doc", "script"],
+                        "description": "Filter by resource type",
+                    },
+                    "versions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by versions",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by tags",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results",
+                        "default": 10,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_resource",
+            description="Get full resource content by ID. For scripts, automatically refreshes if file has changed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": "The resource ID",
+                    },
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="run_script",
+            description="Execute a script resource with optional arguments.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": "The script resource ID",
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Arguments to pass to the script",
+                    },
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="delete_resource",
+            description="Delete a resource.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": "The resource ID to delete",
+                    },
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        # --- Rule tools ---
+        Tool(
+            name="suggest_rule",
+            description="Suggest a rule for human approval. Rules are prescriptive guidance that require rationale.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Rule title (e.g., 'Always GET before PUT on Jira workflows')",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Rule content (the prescription)",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this rule exists (required)",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags for surfacing the rule in relevant contexts",
+                    },
+                    "linked_lessons": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Lesson IDs this rule relates to",
+                    },
+                    "linked_resources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Resource IDs this rule relates to",
+                    },
+                },
+                "required": ["title", "content", "rationale"],
+            },
+        ),
+        Tool(
+            name="get_rule",
+            description="Get a rule by ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The rule ID",
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="unified_search",
+            description="Search across lessons, resources, and rules with optional context-weighted boosting.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                    },
+                    "include_lessons": {
+                        "type": "boolean",
+                        "description": "Include lessons in search",
+                        "default": True,
+                    },
+                    "include_resources": {
+                        "type": "boolean",
+                        "description": "Include resources in search",
+                        "default": True,
+                    },
+                    "include_rules": {
+                        "type": "boolean",
+                        "description": "Include approved rules in search",
+                        "default": True,
+                    },
+                    "resource_type": {
+                        "type": "string",
+                        "enum": ["doc", "script"],
+                        "description": "Filter resources by type",
+                    },
+                    "versions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter resources by versions",
+                    },
+                    "context_tags": {
+                        "type": "object",
+                        "description": "Tag weights for context boosting (e.g., {'jira': 1.5, 'api': null})",
+                        "additionalProperties": {"type": "number", "nullable": True},
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by tags",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results",
+                        "default": 10,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
     ]
 
 
@@ -415,6 +737,213 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             levels = core.list_confidence_levels()
             lines = [f"{l.ordinal}. {l.name}" for l in levels]
             return [TextContent(type="text", text="\n".join(lines))]
+
+        # --- Resource handlers ---
+
+        elif name == "add_resource":
+            from pathlib import Path
+            path = arguments["path"]
+            if not Path(path).exists():
+                return [TextContent(type="text", text=f"Error: Path does not exist: {path}")]
+
+            # Build chunking config if provided
+            chunking_config = None
+            if arguments.get("chunking") and arguments["type"] == "doc":
+                from .chunking import ChunkingConfig
+                chunking_opts = arguments["chunking"]
+                chunking_config = ChunkingConfig(
+                    strategy=chunking_opts.get("strategy", "auto"),
+                    min_chunk_size=chunking_opts.get("min_size", 100),
+                    max_chunk_size=chunking_opts.get("max_size", 800),
+                    header_split_levels=chunking_opts.get("header_levels", [2, 3]),
+                    delimiter_pattern=chunking_opts.get("delimiter_pattern"),
+                )
+
+            # Handle preview mode
+            if arguments.get("preview") and arguments["type"] == "doc":
+                from .chunking import ChunkingConfig, chunk_document
+                content = Path(path).read_text()
+
+                # Use provided config or default
+                preview_config = chunking_config or ChunkingConfig()
+                result = chunk_document(content, preview_config, source_path=path)
+
+                # Format preview
+                import json
+                preview = {
+                    "document_path": result.document_path,
+                    "total_tokens": result.total_tokens,
+                    "strategy": result.strategy,
+                    "strategy_reason": result.strategy_reason,
+                    "chunk_count": len(result.chunks),
+                    "chunks": [
+                        {
+                            "index": c.index,
+                            "title": c.title,
+                            "breadcrumb": c.breadcrumb,
+                            "token_count": c.token_count,
+                            "start_line": c.start_line,
+                            "end_line": c.end_line,
+                            "warnings": c.warnings,
+                        }
+                        for c in result.chunks
+                    ],
+                    "summary": result.summary(),
+                    "warnings": result.warnings,
+                }
+                return [TextContent(
+                    type="text",
+                    text=json.dumps(preview, indent=2),
+                )]
+
+            resource_id = core.add_resource(
+                type=arguments["type"],
+                title=arguments["title"],
+                path=path,
+                versions=arguments.get("versions"),
+                tags=arguments.get("tags"),
+                chunking_config=chunking_config,
+            )
+
+            # Include chunk count in response for docs
+            response_text = f"Resource added with ID: {resource_id}"
+            if arguments["type"] == "doc":
+                from .db import get_db
+                with get_db(config) as conn:
+                    cursor = conn.execute(
+                        "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?",
+                        (resource_id,),
+                    )
+                    chunk_count = cursor.fetchone()[0]
+                response_text += f"\nChunks created: {chunk_count}"
+
+            return [TextContent(
+                type="text",
+                text=response_text,
+            )]
+
+        elif name == "search_resources":
+            results = search_resources(
+                query=arguments["query"],
+                resource_type=arguments.get("type"),
+                versions=arguments.get("versions"),
+                tag_filter=arguments.get("tags"),
+                limit=arguments.get("limit", 10),
+            )
+
+            if not results:
+                return [TextContent(type="text", text="No resources found.")]
+
+            import json
+            formatted = [_search_result_to_dict(r) for r in results]
+            return [TextContent(
+                type="text",
+                text=json.dumps(formatted, indent=2),
+            )]
+
+        elif name == "get_resource":
+            resource = core.get_resource(arguments["resource_id"])
+            if resource is None:
+                return [TextContent(type="text", text="Resource not found.")]
+
+            import json
+            return [TextContent(
+                type="text",
+                text=json.dumps(_resource_to_dict(resource), indent=2),
+            )]
+
+        elif name == "run_script":
+            resource = core.get_resource(arguments["resource_id"])
+            if resource is None:
+                return [TextContent(type="text", text="Resource not found.")]
+
+            if resource.type != "script":
+                return [TextContent(type="text", text=f"Error: Resource is not a script (type: {resource.type})")]
+
+            if not resource.path:
+                return [TextContent(type="text", text="Error: Script has no path")]
+
+            from pathlib import Path
+            if not Path(resource.path).exists():
+                return [TextContent(type="text", text=f"Error: Script file not found: {resource.path}")]
+
+            try:
+                args = arguments.get("args", [])
+                result = subprocess.run(
+                    [resource.path] + args,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                output = f"Exit code: {result.returncode}\n"
+                if result.stdout:
+                    output += f"\nstdout:\n{result.stdout}"
+                if result.stderr:
+                    output += f"\nstderr:\n{result.stderr}"
+                return [TextContent(type="text", text=output)]
+            except subprocess.TimeoutExpired:
+                return [TextContent(type="text", text="Error: Script execution timed out (60s limit)")]
+            except PermissionError:
+                return [TextContent(type="text", text=f"Error: Script is not executable: {resource.path}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error running script: {str(e)}")]
+
+        elif name == "delete_resource":
+            success = core.delete_resource(arguments["resource_id"])
+            if success:
+                return [TextContent(type="text", text="Resource deleted.")]
+            else:
+                return [TextContent(type="text", text="Resource not found.")]
+
+        # --- Rule handlers ---
+
+        elif name == "suggest_rule":
+            rule_id = core.suggest_rule(
+                title=arguments["title"],
+                content=arguments["content"],
+                rationale=arguments["rationale"],
+                tags=arguments.get("tags"),
+                linked_lessons=arguments.get("linked_lessons"),
+                linked_resources=arguments.get("linked_resources"),
+            )
+            return [TextContent(
+                type="text",
+                text=f"Rule suggested with ID: {rule_id}\nNote: Rule requires human approval before it will appear in search results.",
+            )]
+
+        elif name == "get_rule":
+            rule = core.get_rule(arguments["rule_id"])
+            if rule is None:
+                return [TextContent(type="text", text="Rule not found.")]
+
+            import json
+            return [TextContent(
+                type="text",
+                text=json.dumps(_rule_to_dict(rule), indent=2),
+            )]
+
+        elif name == "unified_search":
+            results = unified_search(
+                query=arguments["query"],
+                include_lessons=arguments.get("include_lessons", True),
+                include_resources=arguments.get("include_resources", True),
+                include_rules=arguments.get("include_rules", True),
+                resource_type=arguments.get("resource_type"),
+                versions=arguments.get("versions"),
+                tag_filter=arguments.get("tags"),
+                context_tags=arguments.get("context_tags"),
+                limit=arguments.get("limit", 10),
+            )
+
+            if not results:
+                return [TextContent(type="text", text="No results found.")]
+
+            import json
+            formatted = [_search_result_to_dict(r) for r in results]
+            return [TextContent(
+                type="text",
+                text=json.dumps(formatted, indent=2),
+            )]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

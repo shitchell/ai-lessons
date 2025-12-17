@@ -3,6 +3,7 @@
 __version__ = "0.1.0"
 
 from .core import (
+    # Lessons
     add_lesson,
     get_lesson,
     update_lesson,
@@ -14,9 +15,16 @@ from .core import (
     list_tags,
     list_sources,
     list_confidence_levels,
+    # Resources and chunks
+    get_chunk,
+    list_chunks,
+    list_resources,
+    # Dataclasses
+    ResourceChunk,
 )
 
 __all__ = [
+    # Lessons
     "add_lesson",
     "get_lesson",
     "update_lesson",
@@ -28,4 +36,10 @@ __all__ = [
     "list_tags",
     "list_sources",
     "list_confidence_levels",
+    # Resources and chunks
+    "get_chunk",
+    "list_chunks",
+    "list_resources",
+    # Dataclasses
+    "ResourceChunk",
 ]

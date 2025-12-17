@@ -15,6 +15,8 @@ import sqlite_vec
 
 from .config import Config, get_config
 from .schema import (
+    CHUNK_VECTOR_TABLE_SQL,
+    RESOURCE_VECTOR_TABLE_SQL,
     SCHEMA_SQL,
     SCHEMA_VERSION,
     SEED_CONFIDENCE_LEVELS,
@@ -91,9 +93,13 @@ def init_db(config: Optional[Config] = None, force: bool = False) -> None:
                 "INSERT OR IGNORE INTO source_types (name, description, typical_confidence) VALUES (?, ?, ?)",
                 SEED_SOURCE_TYPES,
             )
+        else:
+            # Run migrations for existing databases
+            _run_migrations(conn, config)
 
-        # Create or verify vector table
+        # Create or verify vector tables
         _ensure_vector_table(conn, config, force)
+        _ensure_resource_vector_tables(conn, config, force)
 
         conn.commit()
 
@@ -137,6 +143,86 @@ def _ensure_vector_table(
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_dimensions', ?)",
         (str(dimensions),),
+    )
+
+
+def _ensure_resource_vector_tables(
+    conn: sqlite3.Connection, config: Config, force: bool = False
+) -> None:
+    """Ensure the resource and chunk vector tables exist."""
+    dimensions = config.embedding.dimensions
+
+    # Check if resource vector table exists
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='resource_embeddings'"
+    )
+    resource_exists = cursor.fetchone() is not None
+
+    # Check if chunk vector table exists
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'"
+    )
+    chunk_exists = cursor.fetchone() is not None
+
+    if force:
+        conn.execute("DROP TABLE IF EXISTS resource_embeddings")
+        conn.execute("DROP TABLE IF EXISTS chunk_embeddings")
+        resource_exists = False
+        chunk_exists = False
+
+    if not resource_exists:
+        conn.execute(RESOURCE_VECTOR_TABLE_SQL.format(dimensions=dimensions))
+
+    if not chunk_exists:
+        conn.execute(CHUNK_VECTOR_TABLE_SQL.format(dimensions=dimensions))
+
+
+def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
+    """Run database migrations for existing databases."""
+    # Get current schema version
+    cursor = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'")
+    row = cursor.fetchone()
+    current_version = int(row[0]) if row else 1
+
+    if current_version < 2:
+        # v2 adds resources and rules tables (handled by SCHEMA_SQL with IF NOT EXISTS)
+        current_version = 2
+
+    if current_version < 3:
+        # v3 adds new columns to resource_chunks for chunking metadata
+        # Check if columns already exist (idempotent migration)
+        cursor = conn.execute("PRAGMA table_info(resource_chunks)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "breadcrumb" not in existing_cols:
+            conn.execute("ALTER TABLE resource_chunks ADD COLUMN breadcrumb TEXT")
+        if "start_line" not in existing_cols:
+            conn.execute("ALTER TABLE resource_chunks ADD COLUMN start_line INTEGER")
+        if "end_line" not in existing_cols:
+            conn.execute("ALTER TABLE resource_chunks ADD COLUMN end_line INTEGER")
+        if "token_count" not in existing_cols:
+            conn.execute("ALTER TABLE resource_chunks ADD COLUMN token_count INTEGER")
+
+        current_version = 3
+
+    if current_version < 4:
+        # v4 adds summary columns to resource_chunks for LLM-generated summaries
+        cursor = conn.execute("PRAGMA table_info(resource_chunks)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "summary" not in existing_cols:
+            conn.execute("ALTER TABLE resource_chunks ADD COLUMN summary TEXT")
+        if "summary_generated_at" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE resource_chunks ADD COLUMN summary_generated_at TIMESTAMP"
+            )
+
+        current_version = 4
+
+    # Update schema version
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
     )
 
 
