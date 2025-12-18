@@ -28,7 +28,20 @@ from .schema import (
 
 
 def _get_connection(db_path: Path) -> sqlite3.Connection:
-    """Create a database connection with sqlite-vec loaded."""
+    """Create a database connection with sqlite-vec extension loaded.
+
+    Configures the connection with:
+    - Row factory for dict-like access to query results
+    - sqlite-vec extension for vector similarity search
+    - WAL mode for better read concurrency
+    - Foreign key constraint enforcement
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        Configured SQLite connection.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.enable_load_extension(True)
@@ -124,14 +137,18 @@ def _ensure_vector_table(
             "SELECT value FROM meta WHERE key = 'embedding_dimensions'"
         )
         row = cursor.fetchone()
-        if row:
-            stored_dims = int(row[0])
-            if stored_dims != dimensions:
-                raise ValueError(
-                    f"Embedding dimensions mismatch: config has {dimensions}, "
-                    f"database has {stored_dims}. Use force=True to recreate "
-                    "the vector table (will require re-embedding all lessons)."
-                )
+        if row is None:
+            raise ValueError(
+                "Vector table exists but dimensions not in meta - database may be "
+                "corrupted. Use init_db(force=True) to recreate."
+            )
+        stored_dims = int(row[0])
+        if stored_dims != dimensions:
+            raise ValueError(
+                f"Embedding dimensions mismatch: config has {dimensions}, "
+                f"database has {stored_dims}. Use force=True to recreate "
+                "the vector table (will require re-embedding all lessons)."
+            )
         return
 
     if exists and force:
@@ -370,25 +387,25 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
                 FROM resource_links
             """)
 
-            for row in cursor.fetchall():
+            for link_row in cursor.fetchall():
                 # Determine from_type and from_id
-                if row["from_chunk_id"]:
-                    from_id = row["from_chunk_id"]
+                if link_row["from_chunk_id"]:
+                    from_id = link_row["from_chunk_id"]
                     from_type = "chunk"
                 else:
-                    from_id = row["from_resource_id"]
+                    from_id = link_row["from_resource_id"]
                     from_type = "resource"
 
                 edge_id = None
 
                 # Only create edge if link is resolved
-                if row["resolved_resource_id"]:
+                if link_row["resolved_resource_id"]:
                     # Determine to_type and to_id
-                    if row["resolved_chunk_id"]:
-                        to_id = row["resolved_chunk_id"]
+                    if link_row["resolved_chunk_id"]:
+                        to_id = link_row["resolved_chunk_id"]
                         to_type = "chunk"
                     else:
-                        to_id = row["resolved_resource_id"]
+                        to_id = link_row["resolved_resource_id"]
                         to_type = "resource"
 
                     # Insert edge
@@ -410,7 +427,7 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
                 conn.execute("""
                     INSERT INTO resource_anchors_temp (from_id, from_type, edge_id, to_path, to_fragment, link_text)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (from_id, from_type, edge_id, row["to_path"], row["to_fragment"], row["link_text"]))
+                """, (from_id, from_type, edge_id, link_row["to_path"], link_row["to_fragment"], link_row["link_text"]))
 
             conn.execute("DROP TABLE resource_links")
 

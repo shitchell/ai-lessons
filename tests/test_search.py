@@ -28,7 +28,6 @@ from ai_lessons.search import (
     _normalize_text,
     _keyword_score,
     _distance_to_score,
-    _keyword_score_with_tags,
     _compute_resource_score,
     compute_version_score,
     # Result types
@@ -182,8 +181,8 @@ class TestDistanceToScore:
     def test_custom_parameters(self):
         """Should accept custom steepness and center."""
         # Steeper curve
-        steep = _distance_to_score(1.0, k=12.0, center=1.0)
-        normal = _distance_to_score(1.0, k=6.0, center=1.0)
+        steep = _distance_to_score(1.0, steepness=12.0, center=1.0)
+        normal = _distance_to_score(1.0, steepness=6.0, center=1.0)
         # Both at center should be ~0.5
         assert abs(steep - 0.5) < 0.01
         assert abs(normal - 0.5) < 0.01
@@ -194,32 +193,32 @@ class TestKeywordScoreWithTags:
 
     def test_tag_match_scores(self):
         """Tag matches should contribute to score."""
-        with_tag = _keyword_score_with_tags("python", "title", "content", ["python"])
-        without_tag = _keyword_score_with_tags("python", "title", "content", [])
+        with_tag = _keyword_score("python", "title", "content", ["python"])
+        without_tag = _keyword_score("python", "title", "content", [])
         assert with_tag > without_tag
 
     def test_tag_weight_higher_than_content(self):
         """Tag matches should be weighted higher than content matches."""
-        tag_match = _keyword_score_with_tags("python", "title", "other", ["python"])
-        content_match = _keyword_score_with_tags("python", "title", "python code", [])
+        tag_match = _keyword_score("python", "title", "other", ["python"])
+        content_match = _keyword_score("python", "title", "python code", [])
         assert tag_match > content_match
 
     def test_multiple_tags(self):
         """Multiple matching tags should increase score."""
-        one_tag = _keyword_score_with_tags("python api", "title", "content", ["python"])
-        two_tags = _keyword_score_with_tags("python api", "title", "content", ["python", "api"])
+        one_tag = _keyword_score("python api", "title", "content", ["python"])
+        two_tags = _keyword_score("python api", "title", "content", ["python", "api"])
         assert two_tags > one_tag
 
     def test_tag_case_insensitive(self):
         """Tag matching should be case-insensitive."""
-        upper = _keyword_score_with_tags("Python", "title", "content", ["python"])
-        lower = _keyword_score_with_tags("python", "title", "content", ["PYTHON"])
+        upper = _keyword_score("Python", "title", "content", ["python"])
+        lower = _keyword_score("python", "title", "content", ["PYTHON"])
         assert upper > 0
         assert lower > 0
 
     def test_empty_query_returns_zero(self):
         """Empty query should return 0."""
-        assert _keyword_score_with_tags("", "title", "content", ["tag"]) == 0.0
+        assert _keyword_score("", "title", "content", ["tag"]) == 0.0
 
 
 class TestComputeResourceScore:

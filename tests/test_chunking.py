@@ -448,6 +448,7 @@ class TestWarnings:
         content = "A" * 5000  # Long content with no sentence boundaries
         config = ChunkingConfig(
             strategy="none",  # Force no chunking
+            min_chunk_size=50,  # Must be less than max_chunk_size
             max_chunk_size=100,
         )
         result = chunk_document(content, config)

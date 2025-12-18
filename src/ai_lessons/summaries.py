@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
 from .config import Config, get_config
 from .db import get_db
+
+logger = logging.getLogger(__name__)
 
 
 # System prompt for summary generation (inspired by jira-docs MCP)
@@ -71,9 +74,9 @@ def _generate_anthropic(content: str, model: str, config: Config) -> str:
     try:
         import anthropic
     except ImportError:
-        raise RuntimeError(
+        raise ImportError(
             "anthropic package not installed. Run: pip install anthropic"
-        )
+        ) from None
 
     api_key = config.summaries.api_key
     if not api_key:
@@ -106,9 +109,9 @@ def _generate_openai(content: str, model: str, config: Config) -> str:
     try:
         import openai
     except ImportError:
-        raise RuntimeError(
+        raise ImportError(
             "openai package not installed. Run: pip install openai"
-        )
+        ) from None
 
     api_key = config.summaries.api_key
     if not api_key:
@@ -192,10 +195,10 @@ def generate_chunk_summaries(
                     title=chunk["title"],
                     config=config,
                 )
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError) as e:
                 # Log error but continue with other chunks
-                import sys
-                print(f"Warning: Failed to generate summary for {chunk_id}: {e}", file=sys.stderr)
+                # RuntimeError: API/model errors, ValueError: invalid input, OSError: network issues
+                logger.warning("Failed to generate summary for %s: %s", chunk_id, e)
                 continue
 
             # Store in database

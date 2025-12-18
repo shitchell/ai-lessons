@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -85,9 +86,31 @@ class OpenAIBackend(EmbeddingBackend):
         }
         return known_dimensions.get(self.model_name, 1536)
 
+    def _validate_api_key(self, client) -> None:
+        """Validate API key by calling a free endpoint.
+
+        Raises:
+            ValueError: If API key is invalid or missing.
+        """
+        if not self.api_key:
+            raise ValueError(
+                "OpenAI API key not provided. Set via config or OPENAI_API_KEY environment variable."
+            )
+        try:
+            # List models is a free endpoint (no tokens consumed)
+            client.models.list()
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "invalid" in error_msg or "api key" in error_msg or "unauthorized" in error_msg:
+                raise ValueError(
+                    f"Invalid OpenAI API key: {e}"
+                ) from e
+            # Other errors (network, etc.) - re-raise as-is
+            raise
+
     @property
     def client(self):
-        """Lazy load the OpenAI client."""
+        """Lazy load the OpenAI client and validate API key on first use."""
         if self._client is None:
             try:
                 from openai import OpenAI
@@ -97,6 +120,7 @@ class OpenAIBackend(EmbeddingBackend):
                     "Install with: pip install ai-lessons[openai]"
                 )
             self._client = OpenAI(api_key=self.api_key)
+            self._validate_api_key(self._client)
         return self._client
 
     def embed(self, text: str) -> list[float]:
@@ -141,25 +165,30 @@ def get_embedder(config: Optional[Config] = None) -> EmbeddingBackend:
         raise ValueError(f"Unknown embedding backend: {embedding_config.backend}")
 
 
-# Global embedder instance (lazy loaded)
+# Global embedder instance (lazy loaded) with thread safety
 _embedder: Optional[EmbeddingBackend] = None
+_embedder_lock = threading.Lock()
 
 
 def embed_text(text: str, config: Optional[Config] = None) -> list[float]:
     """Generate an embedding for the given text using the configured backend."""
     global _embedder
-    if _embedder is None or config is not None:
-        # Reinitialize if config is explicitly provided
-        _embedder = get_embedder(config)
-    return _embedder.embed(text)
+    with _embedder_lock:
+        if _embedder is None or config is not None:
+            # Reinitialize if config is explicitly provided
+            _embedder = get_embedder(config)
+        embedder = _embedder
+    return embedder.embed(text)
 
 
 def embed_batch(texts: list[str], config: Optional[Config] = None) -> list[list[float]]:
     """Generate embeddings for multiple texts using the configured backend."""
     global _embedder
-    if _embedder is None:
-        _embedder = get_embedder(config)
-    return _embedder.embed_batch(texts)
+    with _embedder_lock:
+        if _embedder is None:
+            _embedder = get_embedder(config)
+        embedder = _embedder
+    return embedder.embed_batch(texts)
 
 
 def reload_embedder(config: Optional[Config] = None) -> None:

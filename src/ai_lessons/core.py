@@ -31,6 +31,28 @@ if TYPE_CHECKING:
     from .chunking import ChunkingConfig, ChunkingResult
 
 
+# Unified entity table mappings for tags and embeddings
+# Structure: entity_type -> { 'tags': (table, id_col), 'embeddings': (table, id_col) }
+ENTITY_TABLE_MAP = {
+    'lesson': {
+        'tags': ('lesson_tags', 'lesson_id'),
+        'embeddings': ('lesson_embeddings', 'lesson_id'),
+    },
+    'resource': {
+        'tags': ('resource_tags', 'resource_id'),
+        'embeddings': ('resource_embeddings', 'resource_id'),
+    },
+    'rule': {
+        'tags': ('rule_tags', 'rule_id'),
+        # rules don't have embeddings
+    },
+    'chunk': {
+        # chunks don't have tags
+        'embeddings': ('chunk_embeddings', 'chunk_id'),
+    },
+}
+
+
 def generate_entity_id(entity_type: str) -> str:
     """Generate a new prefixed ID for an entity type.
 
@@ -258,7 +280,16 @@ def _resolve_tag_aliases(tags: list[str], config: Config) -> list[str]:
 
 
 def _generate_id() -> str:
-    """Generate a new ULID for a lesson."""
+    """Generate a new ULID.
+
+    ULIDs (Universally Unique Lexicographically Sortable Identifiers) provide:
+    - Time-ordered sorting (first 48 bits encode timestamp)
+    - 80 bits of randomness for uniqueness
+    - URL-safe, case-insensitive representation
+
+    Returns:
+        26-character ULID string.
+    """
     return str(ULID())
 
 
@@ -282,16 +313,11 @@ def _save_tags(
     if not tags:
         return
 
-    table_map = {
-        'lesson': ('lesson_tags', 'lesson_id'),
-        'resource': ('resource_tags', 'resource_id'),
-        'rule': ('rule_tags', 'rule_id'),
-    }
+    entity_info = ENTITY_TABLE_MAP.get(entity_type)
+    if entity_info is None or 'tags' not in entity_info:
+        raise ValueError(f"Entity type '{entity_type}' does not support tags")
 
-    if entity_type not in table_map:
-        raise ValueError(f"Unknown entity type: {entity_type}")
-
-    table, id_col = table_map[entity_type]
+    table, id_col = entity_info['tags']
     conn.executemany(
         f"INSERT INTO {table} ({id_col}, tag) VALUES (?, ?)",
         [(entity_id, tag) for tag in tags],
@@ -310,16 +336,11 @@ def _delete_tags(
         entity_id: ID of the entity.
         entity_type: One of 'lesson', 'resource', 'rule'.
     """
-    table_map = {
-        'lesson': ('lesson_tags', 'lesson_id'),
-        'resource': ('resource_tags', 'resource_id'),
-        'rule': ('rule_tags', 'rule_id'),
-    }
+    entity_info = ENTITY_TABLE_MAP.get(entity_type)
+    if entity_info is None or 'tags' not in entity_info:
+        raise ValueError(f"Entity type '{entity_type}' does not support tags")
 
-    if entity_type not in table_map:
-        raise ValueError(f"Unknown entity type: {entity_type}")
-
-    table, id_col = table_map[entity_type]
+    table, id_col = entity_info['tags']
     conn.execute(f"DELETE FROM {table} WHERE {id_col} = ?", (entity_id,))
 
 
@@ -338,16 +359,11 @@ def _get_tags(
     Returns:
         List of tags.
     """
-    table_map = {
-        'lesson': ('lesson_tags', 'lesson_id'),
-        'resource': ('resource_tags', 'resource_id'),
-        'rule': ('rule_tags', 'rule_id'),
-    }
+    entity_info = ENTITY_TABLE_MAP.get(entity_type)
+    if entity_info is None or 'tags' not in entity_info:
+        raise ValueError(f"Entity type '{entity_type}' does not support tags")
 
-    if entity_type not in table_map:
-        raise ValueError(f"Unknown entity type: {entity_type}")
-
-    table, id_col = table_map[entity_type]
+    table, id_col = entity_info['tags']
     cursor = conn.execute(
         f"SELECT tag FROM {table} WHERE {id_col} = ?",
         (entity_id,),
@@ -393,7 +409,11 @@ def _fetch_lesson_properties(
 # --- Embedding Helpers ---
 
 
-def _truncate_for_embedding(text: str, max_tokens: int = 7500) -> str:
+# Conservative chars-per-token estimate for truncation (lower = safer)
+CHARS_PER_TOKEN_CONSERVATIVE = 3.5
+
+
+def _truncate_for_embedding(text: Optional[str], max_tokens: int = 7500) -> str:
     """Truncate text to fit within embedding token limit.
 
     For large documents that will be chunked, we create a truncated version
@@ -401,13 +421,16 @@ def _truncate_for_embedding(text: str, max_tokens: int = 7500) -> str:
     work while detailed content is searchable via chunk embeddings.
 
     Args:
-        text: Text to truncate.
+        text: Text to truncate (if None, returns empty string).
         max_tokens: Maximum tokens allowed (default 7500, conservative to ensure we stay
             under 8192 limit accounting for title and tokenization variance).
 
     Returns:
         Truncated text that fits within token limit.
     """
+    if text is None:
+        return ""
+
     # Use same token estimation as chunking module: chars / 4
     # This is conservative since actual tokenization may vary
     estimated_tokens = len(text) // 4
@@ -416,8 +439,7 @@ def _truncate_for_embedding(text: str, max_tokens: int = 7500) -> str:
         return text
 
     # Calculate how many characters we can keep (conservative)
-    # Use 3.5 chars per token to be extra safe
-    max_chars = int(max_tokens * 3.5)
+    max_chars = int(max_tokens * CHARS_PER_TOKEN_CONSERVATIVE)
 
     # Truncate and add indicator
     truncated = text[:max_chars].rsplit('\n', 1)[0]  # Try to keep complete lines
@@ -447,16 +469,11 @@ def _store_embedding(
     embedding = embed_text(truncated_text, config)
     embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
 
-    table_map = {
-        'lesson': ('lesson_embeddings', 'lesson_id'),
-        'resource': ('resource_embeddings', 'resource_id'),
-        'chunk': ('chunk_embeddings', 'chunk_id'),
-    }
+    entity_info = ENTITY_TABLE_MAP.get(entity_type)
+    if entity_info is None or 'embeddings' not in entity_info:
+        raise ValueError(f"Entity type '{entity_type}' does not support embeddings")
 
-    if entity_type not in table_map:
-        raise ValueError(f"Unknown entity type: {entity_type}")
-
-    table, id_col = table_map[entity_type]
+    table, id_col = entity_info['embeddings']
     conn.execute(
         f"INSERT INTO {table} ({id_col}, embedding) VALUES (?, ?)",
         (entity_id, embedding_blob),
@@ -475,16 +492,11 @@ def _delete_embedding(
         entity_id: ID of the entity.
         entity_type: One of 'lesson', 'resource', 'chunk'.
     """
-    table_map = {
-        'lesson': ('lesson_embeddings', 'lesson_id'),
-        'resource': ('resource_embeddings', 'resource_id'),
-        'chunk': ('chunk_embeddings', 'chunk_id'),
-    }
+    entity_info = ENTITY_TABLE_MAP.get(entity_type)
+    if entity_info is None or 'embeddings' not in entity_info:
+        raise ValueError(f"Entity type '{entity_type}' does not support embeddings")
 
-    if entity_type not in table_map:
-        raise ValueError(f"Unknown entity type: {entity_type}")
-
-    table, id_col = table_map[entity_type]
+    table, id_col = entity_info['embeddings']
     conn.execute(f"DELETE FROM {table} WHERE {id_col} = ?", (entity_id,))
 
 
@@ -517,7 +529,16 @@ def add_lesson(
 
     Returns:
         The generated lesson ID.
+
+    Raises:
+        ValueError: If title or content is empty.
     """
+    # Input validation
+    if not title or not title.strip():
+        raise ValueError("Lesson title cannot be empty")
+    if not content or not content.strip():
+        raise ValueError("Lesson content cannot be empty")
+
     if config is None:
         config = get_config()
 
@@ -1956,13 +1977,20 @@ def add_resource(
 
     ensure_initialized(config)
 
+    # Input validation
+    if not title or not title.strip():
+        raise ValueError("Resource title cannot be empty")
+
     if type not in ('doc', 'script'):
         raise ValueError(f"Invalid resource type: {type}")
 
     # Resolve path to absolute, canonical form (resolve symlinks)
     if path:
         from pathlib import Path as PathLib
-        path = str(PathLib(path).resolve())
+        path_obj = PathLib(path).resolve()
+        if not path_obj.exists():
+            raise ValueError(f"Resource path does not exist: {path}")
+        path = str(path_obj)
 
     if type == 'script' and not path:
         raise ValueError("Scripts require a path")
@@ -2663,7 +2691,12 @@ def suggest_rule(
 
     ensure_initialized(config)
 
-    if not rationale:
+    # Input validation
+    if not title or not title.strip():
+        raise ValueError("Rule title cannot be empty")
+    if not content or not content.strip():
+        raise ValueError("Rule content cannot be empty")
+    if not rationale or not rationale.strip():
         raise ValueError("Rationale is required for rules")
 
     # Resolve tag aliases
@@ -2986,72 +3019,6 @@ def unlink_from_rule(
             )
         conn.commit()
         return cursor.rowcount
-
-
-def update_rule(
-    rule_id: str,
-    title: Optional[str] = None,
-    content: Optional[str] = None,
-    rationale: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    config: Optional[Config] = None,
-) -> bool:
-    """Update an existing rule.
-
-    Args:
-        rule_id: The rule ID to update.
-        title: New title (optional).
-        content: New content (optional).
-        rationale: New rationale (optional).
-        tags: New tags (replaces existing).
-        config: Configuration to use.
-
-    Returns:
-        True if rule was updated, False if not found.
-    """
-    if config is None:
-        config = get_config()
-
-    ensure_initialized(config)
-
-    # Check if rule exists
-    existing = get_rule(rule_id, config)
-    if existing is None:
-        return False
-
-    # Resolve tag aliases
-    if tags is not None:
-        tags = _resolve_tag_aliases(tags, config)
-
-    with get_db(config) as conn:
-        # Build update query
-        updates = []
-        params = []
-
-        if title is not None:
-            updates.append("title = ?")
-            params.append(title)
-        if content is not None:
-            updates.append("content = ?")
-            params.append(content)
-        if rationale is not None:
-            updates.append("rationale = ?")
-            params.append(rationale)
-
-        if updates:
-            updates.append("updated_at = CURRENT_TIMESTAMP")
-            query = f"UPDATE rules SET {', '.join(updates)} WHERE id = ?"
-            params.append(rule_id)
-            conn.execute(query, params)
-
-        # Update tags if provided
-        if tags is not None:
-            _delete_tags(conn, rule_id, 'rule')
-            _save_tags(conn, rule_id, 'rule', tags)
-
-        conn.commit()
-
-    return True
 
 
 # --- Resource Link Operations (v3) ---

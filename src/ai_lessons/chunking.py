@@ -11,8 +11,11 @@ Strategies include:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +43,13 @@ class ChunkingConfig:
 
     # Behavior
     complete_sentences: bool = True  # Don't cut mid-sentence
+
+    def __post_init__(self):
+        if self.min_chunk_size >= self.max_chunk_size:
+            raise ValueError(
+                f"min_chunk_size ({self.min_chunk_size}) must be less than "
+                f"max_chunk_size ({self.max_chunk_size})"
+            )
 
 
 @dataclass
@@ -70,6 +80,10 @@ class Chunk:
 
     # Warnings
     warnings: list[str] = field(default_factory=list)  # "oversized", "undersized"
+
+    def __post_init__(self):
+        if self.token_count < 0:
+            raise ValueError(f"token_count must be non-negative, got {self.token_count}")
 
 
 @dataclass
@@ -409,12 +423,34 @@ def _whole_document_chunk(content: str) -> Chunk:
     )
 
 
-def _handle_oversized(chunks: list[Chunk], config: ChunkingConfig) -> list[Chunk]:
-    """Sub-chunk any chunks that exceed max_chunk_size."""
+MAX_CHUNKING_DEPTH = 3  # Maximum recursion depth for oversized chunk handling
+
+
+def _handle_oversized(
+    chunks: list[Chunk], config: ChunkingConfig, depth: int = 0
+) -> list[Chunk]:
+    """Sub-chunk any chunks that exceed max_chunk_size.
+
+    Args:
+        chunks: List of chunks to process.
+        config: Chunking configuration.
+        depth: Current recursion depth (internal use).
+
+    Returns:
+        List of chunks with oversized chunks split.
+    """
     result: list[Chunk] = []
 
     for chunk in chunks:
         if chunk.token_count <= config.max_chunk_size:
+            result.append(chunk)
+        elif depth >= MAX_CHUNKING_DEPTH:
+            # Max depth reached - add warning and keep as-is
+            chunk.warnings.append("max_depth_exceeded")
+            logger.warning(
+                f"Max chunking depth ({MAX_CHUNKING_DEPTH}) exceeded for chunk "
+                f"with {chunk.token_count} tokens"
+            )
             result.append(chunk)
         else:
             # Recursively chunk with fixed-size strategy
@@ -431,6 +467,18 @@ def _handle_oversized(chunks: list[Chunk], config: ChunkingConfig) -> list[Chunk
             # If line-based splitting didn't help (single long line), use character-based
             if len(sub_chunks) == 1 and sub_chunks[0].token_count > config.max_chunk_size:
                 sub_chunks = _chunk_by_characters(chunk.content, sub_config)
+
+            # Recursively handle any still-oversized chunks
+            sub_chunks = _handle_oversized(sub_chunks, config, depth + 1)
+
+            # Check if still oversized after all fallbacks
+            for i, sub in enumerate(sub_chunks):
+                if sub.token_count > config.max_chunk_size and "max_depth_exceeded" not in sub.warnings:
+                    sub.warnings.append("failed_to_split")
+                    logger.warning(
+                        f"Chunk {len(result) + i} still oversized after splitting: "
+                        f"{sub.token_count} tokens (max: {config.max_chunk_size})"
+                    )
 
             # Preserve parent breadcrumb and adjust metadata
             for i, sub in enumerate(sub_chunks):

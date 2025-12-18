@@ -17,29 +17,42 @@ from dataclasses import field
 
 
 # --- Scoring Constants ---
+#
+# These constants were tuned based on empirical testing to provide good
+# differentiation between relevant and irrelevant results.
 
 # Keyword scoring weights
+# Rationale: Title matches are most indicative (3x), tags are explicit metadata (2.5x),
+# content matches are baseline (1x)
 KEYWORD_TITLE_WEIGHT = 3.0
 KEYWORD_CONTENT_WEIGHT = 1.0
 KEYWORD_TAG_WEIGHT = 2.5
 
 # Semantic scoring sigmoid parameters
+# Rationale: These values map cosine distances to intuitive relevance scores:
+# - STEEPNESS=6.0: Creates sharp distinction around the center point
+# - CENTER=1.15: Distance < 1.0 → score > 0.7 (relevant), distance > 1.3 → score < 0.3
 SIGMOID_STEEPNESS = 6.0
 SIGMOID_CENTER = 1.15
 
 # Hybrid search weights
+# Rationale: Semantic similarity is primary (85%), keywords boost exact matches (15%)
 HYBRID_SEMANTIC_WEIGHT = 0.85
 HYBRID_KEYWORD_WEIGHT = 0.15
 
 # Link boosting parameters
+# Rationale: LINK_BOOST_FACTOR=0.25 gives 25% boost for strongly related results,
+# MIN_LINKED_SCORE=0.65 ensures only reasonably relevant links boost scores
 LINK_BOOST_FACTOR = 0.25
 MIN_LINKED_SCORE = 0.65
 MATCH_BONUS = 0.1
 
 # Chunk scoring
+# Rationale: Small boost (3%) for chunk matches to prefer specific content over general
 CHUNK_SPECIFICITY_MULT = 1.03
 
 # Rule default score
+# Rationale: Neutral score (0.5) for tag-matched rules without keyword hits
 RULE_DEFAULT_SCORE = 0.5
 
 
@@ -53,6 +66,10 @@ class SearchResult:
     result_type: str
     tags: list[str] = field(default_factory=list)
 
+    def __post_init__(self):
+        if not (0.0 <= self.score <= 1.0):
+            raise ValueError(f"Score must be between 0.0 and 1.0, got {self.score}")
+
 
 @dataclass
 class LessonResult(SearchResult):
@@ -64,6 +81,7 @@ class LessonResult(SearchResult):
     anti_contexts: list[str] = field(default_factory=list)
 
     def __post_init__(self):
+        super().__post_init__()
         self.result_type = "lesson"
 
 
@@ -75,6 +93,7 @@ class ResourceResult(SearchResult):
     path: Optional[str] = None
 
     def __post_init__(self):
+        super().__post_init__()
         self.result_type = "resource"
 
 
@@ -93,6 +112,7 @@ class ChunkResult(SearchResult):
     path: Optional[str] = None
 
     def __post_init__(self):
+        super().__post_init__()
         self.result_type = "chunk"
 
 
@@ -103,6 +123,7 @@ class RuleResult(SearchResult):
     approved: Optional[bool] = None
 
     def __post_init__(self):
+        super().__post_init__()
         self.result_type = "rule"
 
 
@@ -301,38 +322,52 @@ def _normalize_text(text: str) -> str:
     return text.strip()
 
 
-def _keyword_score(query: str, title: str, content: str) -> float:
-    """Calculate a simple keyword relevance score.
+def _keyword_score(
+    query: str,
+    title: str,
+    content: str,
+    tags: Optional[list[str]] = None,
+) -> float:
+    """Calculate keyword relevance score.
 
-    Uses a basic TF-like scoring where:
-    - Title matches are weighted 3x
-    - Content matches are weighted 1x
-    - Score normalized by query term count
+    Weights:
+    - Title matches: 3.0
+    - Tag matches: 2.5 (if tags provided)
+    - Content matches: 1.0
+
+    Args:
+        query: Search query
+        title: Result title
+        content: Result content (first 500 chars used for efficiency)
+        tags: Result tags (optional)
+
+    Returns:
+        Keyword score normalized by query term count
     """
-    query_terms = _normalize_text(query).split()
+    query_terms = set(_normalize_text(query).split())
     if not query_terms:
         return 0.0
 
     title_norm = _normalize_text(title)
-    content_norm = _normalize_text(content)
+    content_norm = _normalize_text(content[:500])
+    tags_lower = {t.lower() for t in tags} if tags else set()
 
     score = 0.0
     for term in query_terms:
-        # Title match (weighted higher)
         if term in title_norm:
             score += KEYWORD_TITLE_WEIGHT
-        # Content match
+        if tags_lower and term in tags_lower:
+            score += KEYWORD_TAG_WEIGHT
         if term in content_norm:
             score += KEYWORD_CONTENT_WEIGHT
 
-    # Normalize by number of terms
     return score / len(query_terms)
 
 
 # --- v6: Improved Scoring Functions ---
 
 
-def _distance_to_score(distance: float, k: float = SIGMOID_STEEPNESS, center: float = SIGMOID_CENTER) -> float:
+def _distance_to_score(distance: float, steepness: float = SIGMOID_STEEPNESS, center: float = SIGMOID_CENTER) -> float:
     """Convert cosine distance to score using sigmoid function.
 
     This provides much better differentiation than 1/(1+d):
@@ -342,52 +377,13 @@ def _distance_to_score(distance: float, k: float = SIGMOID_STEEPNESS, center: fl
 
     Args:
         distance: Cosine distance (0-2, lower is better)
-        k: Steepness of sigmoid curve (default 6.0)
+        steepness: Steepness of sigmoid curve (default 6.0)
         center: Distance value that maps to 0.5 score (default 1.15)
 
     Returns:
         Score between 0 and 1
     """
-    return 1.0 / (1.0 + math.exp(k * (distance - center)))
-
-
-def _keyword_score_with_tags(
-    query: str, title: str, content: str, tags: list[str]
-) -> float:
-    """Calculate keyword relevance score including tags.
-
-    Weights:
-    - Title matches: 3.0
-    - Tag matches: 2.5
-    - Content matches: 1.0
-
-    Args:
-        query: Search query
-        title: Result title
-        content: Result content (first 500 chars used)
-        tags: Result tags
-
-    Returns:
-        Raw keyword score (not normalized to 0-1)
-    """
-    query_terms = set(_normalize_text(query).split())
-    if not query_terms:
-        return 0.0
-
-    title_norm = _normalize_text(title)
-    content_norm = _normalize_text(content[:500])
-    tags_lower = {t.lower() for t in tags}
-
-    score = 0.0
-    for term in query_terms:
-        if term in title_norm:
-            score += KEYWORD_TITLE_WEIGHT
-        if term in tags_lower:
-            score += KEYWORD_TAG_WEIGHT
-        if term in content_norm:
-            score += KEYWORD_CONTENT_WEIGHT
-
-    return score / len(query_terms)
+    return 1.0 / (1.0 + math.exp(steepness * (distance - center)))
 
 
 def _compute_resource_score(
@@ -423,14 +419,14 @@ def _compute_resource_score(
     base = _distance_to_score(distance)
 
     # Keyword boost (scaled to max 0.15)
-    kw_raw = _keyword_score_with_tags(query, title, content, tags)
-    kw_boost = min(0.15, kw_raw * 0.025)
+    keyword_raw = _keyword_score(query, title, content, tags)
+    keyword_boost = min(0.15, keyword_raw * 0.025)
 
     # Chunk specificity boost
     specificity_mult = CHUNK_SPECIFICITY_MULT if chunk_boost else 1.0
 
     # Combine
-    score = (base + kw_boost) * version_score * specificity_mult
+    score = (base + keyword_boost) * version_score * specificity_mult
     return min(1.0, score)
 
 
@@ -493,7 +489,8 @@ def keyword_search(
         for row in lessons:
             score = _keyword_score(query, row["title"], row["content"])
             if score > 0:
-                scored.append((row, score))
+                # Cap at 1.0 for consistent result scoring
+                scored.append((row, min(1.0, score)))
 
         # Sort by score descending
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -642,9 +639,9 @@ def _row_to_result(
     if query:
         # Use improved scoring: sigmoid distance + keyword boost
         base_score = _distance_to_score(score_or_distance)
-        kw_raw = _keyword_score_with_tags(query, row["title"], row["content"], tags)
-        kw_boost = min(0.15, kw_raw * 0.025)
-        final_score = min(1.0, base_score + kw_boost)
+        keyword_raw = _keyword_score(query, row["title"], row["content"], tags)
+        keyword_boost = min(0.15, keyword_raw * 0.025)
+        final_score = min(1.0, base_score + keyword_boost)
     else:
         # Use precomputed score (from keyword search)
         final_score = score_or_distance
@@ -855,7 +852,7 @@ def _process_resource_row(
 
     # Apply version scoring
     version_score = compute_version_score(resource_versions, query_versions)
-    if version_score == 0.0:
+    if math.isclose(version_score, 0.0):
         return None  # Skip disjoint versions
 
     # Calculate final score using improved scoring
@@ -896,7 +893,7 @@ def _process_chunk_row(
 
     # Apply version scoring
     version_score = compute_version_score(resource_versions, query_versions)
-    if version_score == 0.0:
+    if math.isclose(version_score, 0.0):
         return None  # Skip disjoint versions
 
     # Build display title including breadcrumb
@@ -1266,6 +1263,8 @@ def search_rules(
             score = _keyword_score(query, row["title"], row["content"])
             if score == 0:
                 score = RULE_DEFAULT_SCORE  # Default score for tag-matched rules
+            else:
+                score = min(1.0, score)  # Cap at 1.0 for consistent result scoring
 
             # Get tags
             cursor = conn.execute(
