@@ -11,7 +11,7 @@ import click
 from .. import core
 from ..config import get_config
 from .display import display_chunking_preview
-from .utils import determine_root_dir, generate_title, parse_tags
+from .utils import determine_root_dir, generate_title, parse_tags, warn_deprecation
 
 
 @click.group()
@@ -97,6 +97,7 @@ def update_lesson(
     source_notes: Optional[str],
 ):
     """Update an existing lesson."""
+    warn_deprecation("update-lesson", "update LSN...")
     success = core.update_lesson(
         lesson_id=lesson_id,
         title=title,
@@ -114,11 +115,111 @@ def update_lesson(
         sys.exit(1)
 
 
+@contribute.command("update")
+@click.argument("id")
+# Universal options
+@click.option("--title", "-t", help="New title")
+@click.option("--tags", help="New comma-separated tags (replaces existing)")
+# Lesson options
+@click.option("--lesson-content", help="New lesson content")
+@click.option("--lesson-confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]), help="New confidence level")
+@click.option("--lesson-source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]), help="New source type")
+@click.option("--lesson-source-notes", help="New source notes")
+# Resource options
+@click.option("--resource-version", "resource_versions", multiple=True, help="New version(s)")
+# Rule options
+@click.option("--rule-content", help="New rule content")
+@click.option("--rule-rationale", help="New rationale")
+def update_cmd(
+    id: str,
+    title: Optional[str],
+    tags: Optional[str],
+    # Lesson options
+    lesson_content: Optional[str],
+    lesson_confidence: Optional[str],
+    lesson_source: Optional[str],
+    lesson_source_notes: Optional[str],
+    # Resource options
+    resource_versions: tuple,
+    # Rule options
+    rule_content: Optional[str],
+    rule_rationale: Optional[str],
+):
+    """Update any entity by ID. Type detected from prefix.
+
+    Examples:
+      ai-lessons contribute update LSN01KCP... --title "New title"
+      ai-lessons contribute update RES01KCP... --tags new,tags --resource-version v4
+      ai-lessons contribute update RUL01KCP... --rule-rationale "Better reasoning"
+    """
+    # Detect type from ID prefix
+    try:
+        entity_type, _ = core.parse_entity_id(id)
+    except ValueError:
+        click.echo(f"Unknown ID format: {id}", err=True)
+        sys.exit(1)
+
+    tag_list = parse_tags(tags)
+
+    if entity_type == "chunk":
+        click.echo("Error: Chunks are updated via their parent resource.", err=True)
+        click.echo("Use `refresh RES...` to reload content from filesystem.", err=True)
+        sys.exit(1)
+
+    elif entity_type == "lesson":
+        success = core.update_lesson(
+            lesson_id=id,
+            title=title,
+            content=lesson_content,
+            tags=tag_list,
+            confidence=lesson_confidence,
+            source=lesson_source,
+            source_notes=lesson_source_notes,
+        )
+        if success:
+            click.echo(f"Updated lesson: {id}")
+        else:
+            click.echo(f"Lesson not found: {id}", err=True)
+            sys.exit(1)
+
+    elif entity_type == "resource":
+        success = core.update_resource(
+            resource_id=id,
+            tags=tag_list,
+            versions=list(resource_versions) if resource_versions else None,
+        )
+        if success:
+            click.echo(f"Updated resource: {id}")
+            click.echo("Note: To update content, use `refresh` to reload from filesystem.")
+        else:
+            click.echo(f"Resource not found: {id}", err=True)
+            sys.exit(1)
+
+    elif entity_type == "rule":
+        success = core.update_rule(
+            rule_id=id,
+            title=title,
+            content=rule_content,
+            rationale=rule_rationale,
+            tags=tag_list,
+        )
+        if success:
+            click.echo(f"Updated rule: {id}")
+        else:
+            click.echo(f"Rule not found: {id}", err=True)
+            sys.exit(1)
+
+    else:
+        click.echo(f"Unknown entity type: {entity_type}", err=True)
+        sys.exit(1)
+
+
 @contribute.command("delete-lesson")
 @click.argument("lesson_id")
 @click.confirmation_option(prompt="Are you sure you want to delete this lesson?")
 def delete_lesson(lesson_id: str):
     """Delete a lesson."""
+    warn_deprecation("delete-lesson", "delete LSN...")
     success = core.delete_lesson(lesson_id)
 
     if success:
@@ -128,12 +229,72 @@ def delete_lesson(lesson_id: str):
         sys.exit(1)
 
 
+@contribute.command("delete")
+@click.argument("id")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def delete_cmd(id: str, yes: bool):
+    """Delete any entity by ID. Type detected from prefix.
+
+    Examples:
+      ai-lessons contribute delete LSN01KCP...
+      ai-lessons contribute delete RES01KCP... --yes
+      ai-lessons contribute delete RUL01KCP...
+    """
+    # Detect type from ID prefix
+    try:
+        entity_type, _ = core.parse_entity_id(id)
+    except ValueError:
+        click.echo(f"Unknown ID format: {id}", err=True)
+        sys.exit(1)
+
+    if entity_type == "chunk":
+        click.echo("Error: Chunks are deleted with their parent resource.", err=True)
+        click.echo("Use `delete RES...` to delete the parent resource and all its chunks.", err=True)
+        sys.exit(1)
+
+    # Confirm deletion
+    type_name = entity_type.capitalize()
+    if not yes:
+        if not click.confirm(f"Are you sure you want to delete this {entity_type}?"):
+            click.echo("Aborted.")
+            return
+
+    if entity_type == "lesson":
+        success = core.delete_lesson(id)
+        if success:
+            click.echo(f"Deleted lesson: {id}")
+        else:
+            click.echo(f"Lesson not found: {id}", err=True)
+            sys.exit(1)
+
+    elif entity_type == "resource":
+        success = core.delete_resource(id)
+        if success:
+            click.echo(f"Deleted resource: {id}")
+        else:
+            click.echo(f"Resource not found: {id}", err=True)
+            sys.exit(1)
+
+    elif entity_type == "rule":
+        success = core.delete_rule(id)
+        if success:
+            click.echo(f"Deleted rule: {id}")
+        else:
+            click.echo(f"Rule not found: {id}", err=True)
+            sys.exit(1)
+
+    else:
+        click.echo(f"Unknown entity type: {entity_type}", err=True)
+        sys.exit(1)
+
+
 @contribute.command("link-lesson")
 @click.argument("from_id")
 @click.argument("to_id")
 @click.option("--relation", "-r", required=True, help="Relationship type (e.g., related_to, derived_from)")
 def link_lesson(from_id: str, to_id: str, relation: str):
     """Create a link between two lessons."""
+    warn_deprecation("link-lesson", "link LSN... LSN...")
     success = core.link_lessons(from_id, to_id, relation)
 
     if success:
@@ -149,6 +310,7 @@ def link_lesson(from_id: str, to_id: str, relation: str):
 @click.option("--relation", "-r", help="Specific relation to remove (all if not specified)")
 def unlink_lesson(from_id: str, to_id: str, relation: Optional[str]):
     """Remove link(s) between two lessons."""
+    warn_deprecation("unlink-lesson", "unlink LSN... LSN...")
     count = core.unlink_lessons(from_id, to_id, relation)
     click.echo(f"Removed {count} link(s)")
 
@@ -163,6 +325,7 @@ def link_resource(lesson_id: str, resource_id: str, relation: str):
     Creates a connection between a lesson and a resource document/script.
     This allows related documentation to be surfaced alongside lessons.
     """
+    warn_deprecation("link-resource", "link LSN... RES...")
     # Verify lesson exists
     lesson = core.get_lesson(lesson_id)
     if not lesson:
@@ -189,12 +352,63 @@ def link_resource(lesson_id: str, resource_id: str, relation: str):
 @click.argument("resource_id")
 def unlink_resource(lesson_id: str, resource_id: str):
     """Remove a link between a lesson and a resource."""
+    warn_deprecation("unlink-resource", "unlink LSN... RES...")
     success = core.unlink_lesson_from_resource(lesson_id, resource_id)
 
     if success:
         click.echo(f"Unlinked lesson {lesson_id} from resource {resource_id}")
     else:
         click.echo("Link not found.", err=True)
+        sys.exit(1)
+
+
+@contribute.command("link")
+@click.argument("from_id")
+@click.argument("to_id")
+@click.option("--relation", "-r", default="related_to", help="Relationship type (default: related_to)")
+def link_cmd(from_id: str, to_id: str, relation: str):
+    """Link any entity to any other entity.
+
+    Type is auto-detected from ID prefixes (LSN, RES, RUL).
+
+    Examples:
+      # Lesson to lesson
+      ai-lessons contribute link LSN111... LSN222... --relation derived_from
+
+      # Lesson to resource
+      ai-lessons contribute link LSN111... RES222... --relation documents
+
+      # Rule to lesson
+      ai-lessons contribute link RUL111... LSN222... --relation based_on
+    """
+    success = core.link_entities(from_id, to_id, relation)
+
+    if success:
+        click.echo(f"Linked {from_id[:15]}... --[{relation}]--> {to_id[:15]}...")
+    else:
+        click.echo("Link already exists or invalid IDs.", err=True)
+        sys.exit(1)
+
+
+@contribute.command("unlink")
+@click.argument("from_id")
+@click.argument("to_id")
+@click.option("--relation", "-r", help="Specific relation to remove (all if not specified)")
+def unlink_cmd(from_id: str, to_id: str, relation: Optional[str]):
+    """Remove link(s) between any two entities.
+
+    Type is auto-detected from ID prefixes (LSN, RES, RUL).
+
+    Examples:
+      ai-lessons contribute unlink LSN111... LSN222...
+      ai-lessons contribute unlink LSN111... RES222... --relation documents
+    """
+    count = core.unlink_entities(from_id, to_id, relation)
+
+    if count > 0:
+        click.echo(f"Removed {count} link(s)")
+    else:
+        click.echo("No matching links found.", err=True)
         sys.exit(1)
 
 
@@ -317,7 +531,7 @@ def add_resource(
             total_chunks += len(result.chunks)
             all_warnings.extend(result.warnings)
 
-        click.echo(f"Added: {resource_id[:12]}... {title}")
+        click.echo(f"Added: {resource_id[:15]}... {title}")
 
     # Summary
     click.echo()
@@ -342,7 +556,7 @@ def add_resource(
                         summaries = generate_chunk_summaries(resource_id=resource_id, config=config)
                         total_summaries += len(summaries)
                     except Exception as e:
-                        click.echo(f"  Warning: Failed for {resource_id[:12]}...: {e}", err=True)
+                        click.echo(f"  Warning: Failed for {resource_id[:15]}...: {e}", err=True)
                 click.echo(f"  Generated {total_summaries} summaries.")
         else:
             config = get_config()
@@ -350,10 +564,43 @@ def add_resource(
                 click.echo("  Tip: Use --generate-summaries to create searchable summaries.")
 
 
+@contribute.command("refresh")
+@click.argument("id")
+def refresh_cmd(id: str):
+    """Refresh a resource's content from its source path.
+
+    Only applies to resources - other entity types don't have source paths.
+
+    Example:
+      ai-lessons contribute refresh RES01KCP...
+    """
+    # Detect type from ID prefix
+    try:
+        entity_type, _ = core.parse_entity_id(id)
+    except ValueError:
+        click.echo(f"Unknown ID format: {id}", err=True)
+        sys.exit(1)
+
+    if entity_type != "resource":
+        click.echo(f"Error: refresh only applies to resources (got {entity_type}).", err=True)
+        if entity_type == "chunk":
+            click.echo("Hint: Refresh the parent resource to update chunks.", err=True)
+        sys.exit(1)
+
+    success = core.refresh_resource(id)
+
+    if success:
+        click.echo(f"Refreshed resource: {id}")
+    else:
+        click.echo(f"Resource not found or has no path: {id}", err=True)
+        sys.exit(1)
+
+
 @contribute.command("refresh-resource")
 @click.argument("resource_id")
 def refresh_resource(resource_id: str):
     """Refresh a resource's content from its source path."""
+    warn_deprecation("refresh-resource", "refresh RES...")
     success = core.refresh_resource(resource_id)
 
     if success:
@@ -368,6 +615,7 @@ def refresh_resource(resource_id: str):
 @click.confirmation_option(prompt="Are you sure you want to delete this resource?")
 def delete_resource(resource_id: str):
     """Delete a resource."""
+    warn_deprecation("delete-resource", "delete RES...")
     success = core.delete_resource(resource_id)
 
     if success:

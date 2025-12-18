@@ -176,18 +176,7 @@ def approve_rule(rule_id: str, approved_by: Optional[str]):
         sys.exit(1)
 
 
-@admin.command("reject-rule")
-@click.argument("rule_id")
-@click.confirmation_option(prompt="Are you sure you want to reject (delete) this rule?")
-def reject_rule(rule_id: str):
-    """Reject (delete) a suggested rule."""
-    success = core.reject_rule(rule_id)
-
-    if success:
-        click.echo(f"Rejected rule: {rule_id}")
-    else:
-        click.echo(f"Rule not found: {rule_id}", err=True)
-        sys.exit(1)
+# NOTE: reject-rule has been removed in favor of `contribute delete RUL...`
 
 
 @admin.command("reindex-resources")
@@ -334,7 +323,7 @@ def generate_summaries(
         click.echo("Dry run - would generate summaries for:")
         for chunk in chunks[:10]:  # Show first 10
             title = chunk["title"] or f"(chunk)"
-            click.echo(f"  {chunk['id'][:12]}... {title}")
+            click.echo(f"  {chunk['id'][:15]}... {title}")
         if len(chunks) > 10:
             click.echo(f"  ... and {len(chunks) - 10} more")
         return
@@ -463,7 +452,7 @@ def clear_resources(
 
     click.echo(f"{'Would delete' if dry_run else 'Will delete'} {len(resources)} resource(s):")
     for resource in resources[:10]:
-        click.echo(f"  [{resource.id[:12]}...] {resource.title}")
+        click.echo(f"  [{resource.id[:15]}...] {resource.title}")
     if len(resources) > 10:
         click.echo(f"  ... and {len(resources) - 10} more")
 

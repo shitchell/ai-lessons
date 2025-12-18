@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Schema creation SQL
 SCHEMA_SQL = """
@@ -55,9 +55,9 @@ CREATE TABLE IF NOT EXISTS lesson_contexts (
 CREATE TABLE IF NOT EXISTS edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_id TEXT NOT NULL,
-    from_type TEXT NOT NULL CHECK (from_type IN ('lesson', 'resource', 'chunk')),
+    from_type TEXT NOT NULL CHECK (from_type IN ('lesson', 'resource', 'chunk', 'rule')),
     to_id TEXT NOT NULL,
-    to_type TEXT NOT NULL CHECK (to_type IN ('lesson', 'resource', 'chunk')),
+    to_type TEXT NOT NULL CHECK (to_type IN ('lesson', 'resource', 'chunk', 'rule')),
     relation TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(from_id, from_type, to_id, to_type, relation)

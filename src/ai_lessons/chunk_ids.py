@@ -1,7 +1,7 @@
 """Chunk ID utilities.
 
 Chunk IDs follow the format: <resource_id>.<chunk_index>
-Example: 01KCPN9VWAZNSKYVHPCWVPXA2C.1
+Example: RES01KCPN9VWAZNSKYVHPCWVPXA2C.1
 
 This makes the parent relationship structural and allows easy parsing.
 """
@@ -41,7 +41,7 @@ def parse_chunk_id(chunk_id: str) -> Optional[ParsedChunkId]:
     """Parse a chunk ID into components.
 
     Args:
-        chunk_id: Chunk ID to parse (e.g., "01KCPN9V.1").
+        chunk_id: Chunk ID to parse (e.g., "RES01KCPN9V...0").
 
     Returns:
         ParsedChunkId if valid, None if invalid format.
@@ -83,7 +83,7 @@ def is_chunk_id(id_str: str) -> bool:
 
 
 def is_resource_id(id_str: str) -> bool:
-    """Check if a string is a resource ID (no .N suffix).
+    """Check if a string is a resource ID (has RES prefix, no .N suffix).
 
     Args:
         id_str: ID string to check.
@@ -91,4 +91,4 @@ def is_resource_id(id_str: str) -> bool:
     Returns:
         True if looks like a resource ID, False otherwise.
     """
-    return "." not in id_str
+    return id_str.startswith("RES") and "." not in id_str

@@ -22,7 +22,7 @@ pip install ai-lessons[all]
 ai-lessons admin init
 
 # Add your first lesson
-ai-lessons contribute add \
+ai-lessons contribute add-lesson \
   --title "Always GET before PUT on Jira workflows" \
   --content "PUT /workflows deletes any statuses not included in the payload" \
   --tags jira,api,gotcha \
@@ -81,7 +81,11 @@ For OpenAI embeddings, set `OPENAI_API_KEY` in your environment.
 
 ## CLI Usage
 
-Commands are organized into three groups:
+Commands are organized into three groups. Entity IDs use type prefixes for instant recognition:
+- `LSN...` - Lessons
+- `RES...` - Resources
+- `RUL...` - Rules
+- `RES....N` - Chunks (resource ID + `.N` suffix)
 
 ### `admin` - Database management
 ```bash
@@ -89,29 +93,68 @@ ai-lessons admin init              # Initialize database
 ai-lessons admin stats             # Show statistics
 ai-lessons admin merge-tags A B    # Merge tag A into B
 ai-lessons admin add-source NAME   # Add new source type
+ai-lessons admin pending-rules     # Review pending rules
+ai-lessons admin approve-rule ID   # Approve a rule
 ```
 
 ### `contribute` - Add and modify
 ```bash
 # Add lessons
-ai-lessons contribute add --title "..." --content "..." --tags a,b
-ai-lessons contribute update ID --confidence high
-ai-lessons contribute delete ID
-ai-lessons contribute link ID1 ID2 --relation derived_from
+ai-lessons contribute add-lesson --title "..." --content "..." --tags a,b
 
 # Add resources (docs and scripts)
-ai-lessons contribute add-resource --type doc --path docs/api.md --title "API Docs" --version v3
-ai-lessons contribute add-resource --type script --path scripts/deploy.sh --title "Deploy Script"
+ai-lessons contribute add-resource -t doc docs/api.md --version v3
+ai-lessons contribute add-resource -t script scripts/deploy.sh
+
+# Suggest rules (require approval)
+ai-lessons contribute suggest-rule --title "..." --content "..." --rationale "..."
+
+# Unified update (works with any entity type - detected from ID prefix)
+ai-lessons contribute update LSN01... --title "New title"
+ai-lessons contribute update RES01... --tags new,tags --resource-version v4
+ai-lessons contribute update RUL01... --rule-rationale "Better reasoning"
+
+# Unified delete (works with any entity type)
+ai-lessons contribute delete LSN01...
+ai-lessons contribute delete RES01... --yes
+
+# Unified link/unlink (any entity to any entity)
+ai-lessons contribute link LSN01... LSN02... --relation derived_from
+ai-lessons contribute link LSN01... RES01... --relation documents
+ai-lessons contribute unlink LSN01... RES01...
+
+# Refresh resource content from filesystem
+ai-lessons contribute refresh RES01...
 
 # Preview how a document will be chunked
-ai-lessons contribute add-resource --type doc --path docs/guide.md --title "Guide" --preview
+ai-lessons contribute add-resource -t doc docs/guide.md --preview
 ```
 
 ### `recall` - Search and view
 ```bash
-ai-lessons recall search "query" --tags api --limit 5
-ai-lessons recall show ID
-ai-lessons recall related ID --depth 2
+# Unified search (all types or filtered)
+ai-lessons recall search "query"                           # Search all
+ai-lessons recall search "query" --type lesson             # Lessons only
+ai-lessons recall search "query" --type resource -g        # Resources, grouped
+ai-lessons recall search "query" --lesson-confidence-min high  # Filter lessons
+
+# Unified show (type detected from ID prefix)
+ai-lessons recall show LSN01...     # Show lesson
+ai-lessons recall show RES01...     # Show resource
+ai-lessons recall show RES01....0   # Show chunk
+ai-lessons recall show RUL01...     # Show rule
+
+# Unified list (by type)
+ai-lessons recall list --type lesson
+ai-lessons recall list --type resource --resource-type script
+ai-lessons recall list --type rule --rule-pending
+ai-lessons recall list --type chunk --chunk-parent RES01...
+
+# Unified related (type detected from ID prefix)
+ai-lessons recall related LSN01... --depth 2
+ai-lessons recall related RES01...
+
+# Metadata commands
 ai-lessons recall tags --counts
 ai-lessons recall sources
 ai-lessons recall confidence

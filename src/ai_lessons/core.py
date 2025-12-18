@@ -31,6 +31,72 @@ if TYPE_CHECKING:
     from .chunking import ChunkingConfig, ChunkingResult
 
 
+def generate_entity_id(entity_type: str) -> str:
+    """Generate a new prefixed ID for an entity type.
+
+    Args:
+        entity_type: One of 'lesson', 'resource', 'rule'.
+
+    Returns:
+        Prefixed ID (e.g., 'LSN01KCPYNGF1ZNRSQE5KANFAHH4N').
+
+    Raises:
+        ValueError: If entity_type is invalid.
+    """
+    prefix_map = {
+        "lesson": "LSN",
+        "resource": "RES",
+        "rule": "RUL",
+    }
+
+    if entity_type not in prefix_map:
+        raise ValueError(f"Invalid entity_type: {entity_type}. Must be one of: {list(prefix_map.keys())}")
+
+    prefix = prefix_map[entity_type]
+    return f"{prefix}{ULID()}"
+
+
+def parse_entity_id(id_str: str) -> tuple[str, str]:
+    """Parse a prefixed entity ID.
+
+    Returns:
+        Tuple of (entity_type, base_id) where entity_type is one of:
+        'lesson', 'resource', 'chunk', 'rule'.
+
+    Examples:
+        parse_entity_id("LSN01KCP...") → ("lesson", "01KCP...")
+        parse_entity_id("RES01KCP....0") → ("chunk", "RES01KCP....0")
+        parse_entity_id("RES01KCP...") → ("resource", "RES01KCP...")
+        parse_entity_id("RUL01KCP...") → ("rule", "RUL01KCP...")
+
+    Raises:
+        ValueError: If ID format is invalid.
+    """
+    # Check for chunk ID first (has .N suffix)
+    if "." in id_str:
+        # Chunk IDs keep the full ID including prefix
+        # Format: RES<ulid>.<index>
+        return ("chunk", id_str)
+
+    # Extract prefix (first 3 chars)
+    if len(id_str) < 3:
+        raise ValueError(f"Invalid ID format: {id_str} (too short)")
+
+    prefix = id_str[:3]
+    base_id = id_str[3:]
+
+    prefix_map = {
+        "LSN": "lesson",
+        "RES": "resource",
+        "RUL": "rule",
+    }
+
+    if prefix not in prefix_map:
+        raise ValueError(f"Invalid ID prefix: {prefix}. Must be one of: {list(prefix_map.keys())}")
+
+    return (prefix_map[prefix], base_id)
+
+
 @dataclass
 class Lesson:
     """A lesson with all its metadata.
@@ -462,7 +528,7 @@ def add_lesson(
         tags = _resolve_tag_aliases(tags, config)
 
     # Generate ID
-    lesson_id = _generate_id()
+    lesson_id = generate_entity_id("lesson")
 
     with get_db(config) as conn:
         # Insert lesson
@@ -546,7 +612,7 @@ def add_lessons_batch(
                 tags = _resolve_tag_aliases(tags, config)
 
             # Generate ID
-            lesson_id = _generate_id()
+            lesson_id = generate_entity_id("lesson")
             lesson_ids.append(lesson_id)
 
             # Insert lesson
@@ -816,6 +882,201 @@ def recall(
         raise ValueError(f"Unknown search strategy: {strategy}")
 
 
+def list_lessons(
+    pattern: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    confidence: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: int = 100,
+    config: Optional[Config] = None,
+) -> list[Lesson]:
+    """List lessons with optional filtering.
+
+    Args:
+        pattern: Filter by title (case-insensitive substring).
+        tags: Filter by tags (ANY match).
+        confidence: Filter by exact confidence level.
+        source: Filter by exact source type.
+        limit: Maximum results.
+        config: Configuration to use.
+
+    Returns:
+        List of lessons matching the filters.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Resolve tag aliases
+    if tags:
+        tags = _resolve_tag_aliases(tags, config)
+
+    with get_db(config) as conn:
+        # Build query
+        query = "SELECT * FROM lessons WHERE 1=1"
+        params: list = []
+
+        if pattern:
+            query += " AND title LIKE ?"
+            params.append(f"%{pattern}%")
+
+        if confidence:
+            query += " AND confidence = ?"
+            params.append(confidence)
+
+        if source:
+            query += " AND source = ?"
+            params.append(source)
+
+        if tags:
+            placeholders = ",".join("?" * len(tags))
+            query += f"""
+                AND id IN (
+                    SELECT lesson_id FROM lesson_tags
+                    WHERE tag IN ({placeholders})
+                )
+            """
+            params.extend(tags)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        # Build Lesson objects
+        lessons = []
+        for row in rows:
+            lesson_tags, contexts, anti_contexts = _fetch_lesson_properties(conn, row["id"])
+            lessons.append(Lesson(
+                id=row["id"],
+                title=row["title"],
+                content=row["content"],
+                confidence=row["confidence"],
+                source=row["source"],
+                source_notes=row["source_notes"],
+                tags=lesson_tags,
+                contexts=contexts,
+                anti_contexts=anti_contexts,
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            ))
+
+        return lessons
+
+
+def list_rules(
+    pattern: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    pending: bool = False,
+    approved: bool = True,
+    limit: int = 100,
+    config: Optional[Config] = None,
+) -> list["Rule"]:
+    """List rules with optional filtering.
+
+    Args:
+        pattern: Filter by title (case-insensitive substring).
+        tags: Filter by tags (ANY match).
+        pending: Include pending (unapproved) rules.
+        approved: Include approved rules.
+        limit: Maximum results.
+        config: Configuration to use.
+
+    Returns:
+        List of rules matching the filters.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Resolve tag aliases
+    if tags:
+        tags = _resolve_tag_aliases(tags, config)
+
+    with get_db(config) as conn:
+        # Build query
+        query = "SELECT * FROM rules WHERE 1=1"
+        params: list = []
+
+        if pattern:
+            query += " AND title LIKE ?"
+            params.append(f"%{pattern}%")
+
+        # Approval status filter
+        approval_conditions = []
+        if approved:
+            approval_conditions.append("approved = 1")
+        if pending:
+            approval_conditions.append("approved = 0")
+
+        if approval_conditions:
+            query += f" AND ({' OR '.join(approval_conditions)})"
+        elif not approved and not pending:
+            # Neither approved nor pending requested - return empty
+            return []
+
+        if tags:
+            placeholders = ",".join("?" * len(tags))
+            query += f"""
+                AND id IN (
+                    SELECT rule_id FROM rule_tags
+                    WHERE tag IN ({placeholders})
+                )
+            """
+            params.extend(tags)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        # Build Rule objects
+        rules = []
+        for row in rows:
+            # Get tags
+            tag_cursor = conn.execute(
+                "SELECT tag FROM rule_tags WHERE rule_id = ?",
+                (row["id"],)
+            )
+            rule_tags = [r["tag"] for r in tag_cursor.fetchall()]
+
+            # Get linked lessons
+            lesson_cursor = conn.execute(
+                "SELECT to_id FROM edges WHERE from_id = ? AND from_type = 'rule' AND to_type = 'lesson'",
+                (row["id"],)
+            )
+            linked_lessons = [r["to_id"] for r in lesson_cursor.fetchall()]
+
+            # Get linked resources
+            resource_cursor = conn.execute(
+                "SELECT to_id FROM edges WHERE from_id = ? AND from_type = 'rule' AND to_type = 'resource'",
+                (row["id"],)
+            )
+            linked_resources = [r["to_id"] for r in resource_cursor.fetchall()]
+
+            rules.append(Rule(
+                id=row["id"],
+                title=row["title"],
+                content=row["content"],
+                rationale=row["rationale"],
+                approved=bool(row["approved"]),
+                approved_at=row["approved_at"],
+                approved_by=row["approved_by"],
+                suggested_by=row["suggested_by"],
+                tags=rule_tags,
+                linked_lessons=linked_lessons,
+                linked_resources=linked_resources,
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            ))
+
+        return rules
+
+
 # --- Graph Operations ---
 
 
@@ -1019,6 +1280,102 @@ def unlink_lesson_from_resource(
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def link_entities(
+    from_id: str,
+    to_id: str,
+    relation: str,
+    config: Optional[Config] = None,
+) -> bool:
+    """Create an edge between any two entities.
+
+    Type is auto-detected from ID prefixes.
+
+    Args:
+        from_id: Source entity ID.
+        to_id: Target entity ID.
+        relation: Relationship type.
+        config: Configuration to use.
+
+    Returns:
+        True if edge was created, False if already exists or invalid IDs.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Parse entity types from IDs
+    try:
+        from_type, _ = parse_entity_id(from_id)
+        to_type, _ = parse_entity_id(to_id)
+    except ValueError:
+        return False
+
+    with get_db(config) as conn:
+        try:
+            conn.execute(
+                """INSERT INTO edges (from_id, from_type, to_id, to_type, relation)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (from_id, from_type, to_id, to_type, relation),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Edge already exists
+            return False
+
+
+def unlink_entities(
+    from_id: str,
+    to_id: str,
+    relation: Optional[str] = None,
+    config: Optional[Config] = None,
+) -> int:
+    """Remove edge(s) between any two entities.
+
+    Type is auto-detected from ID prefixes.
+
+    Args:
+        from_id: Source entity ID.
+        to_id: Target entity ID.
+        relation: Specific relation to remove (all if None).
+        config: Configuration to use.
+
+    Returns:
+        Number of edges removed.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Parse entity types from IDs
+    try:
+        from_type, _ = parse_entity_id(from_id)
+        to_type, _ = parse_entity_id(to_id)
+    except ValueError:
+        return 0
+
+    with get_db(config) as conn:
+        if relation:
+            cursor = conn.execute(
+                """DELETE FROM edges
+                   WHERE from_id = ? AND from_type = ?
+                   AND to_id = ? AND to_type = ?
+                   AND relation = ?""",
+                (from_id, from_type, to_id, to_type, relation),
+            )
+        else:
+            cursor = conn.execute(
+                """DELETE FROM edges
+                   WHERE from_id = ? AND from_type = ?
+                   AND to_id = ? AND to_type = ?""",
+                (from_id, from_type, to_id, to_type),
+            )
+        conn.commit()
+        return cursor.rowcount
 
 
 @dataclass
@@ -1643,7 +2000,7 @@ def add_resource(
         tags = _resolve_tag_aliases(tags, config)
 
     # Generate ID and metadata
-    resource_id = _generate_id()
+    resource_id = generate_entity_id("resource")
     content_hash = _compute_content_hash(content)
     source_ref = _get_git_ref(path) if path else None
 
@@ -1979,6 +2336,63 @@ def refresh_resource(resource_id: str, config: Optional[Config] = None) -> bool:
     return True
 
 
+def update_resource(
+    resource_id: str,
+    tags: Optional[list[str]] = None,
+    versions: Optional[list[str]] = None,
+    config: Optional[Config] = None,
+) -> bool:
+    """Update resource metadata (not content - use refresh for that).
+
+    Args:
+        resource_id: The resource ID to update.
+        tags: New tags (replaces existing).
+        versions: New versions (replaces existing).
+        config: Configuration to use.
+
+    Returns:
+        True if resource was updated, False if not found.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Check if resource exists
+    resource = get_resource(resource_id, config)
+    if resource is None:
+        return False
+
+    # Resolve tag aliases
+    if tags is not None:
+        tags = _resolve_tag_aliases(tags, config)
+
+    with get_db(config) as conn:
+        # Update tags if provided
+        if tags is not None:
+            _delete_tags(conn, resource_id, 'resource')
+            _save_tags(conn, resource_id, 'resource', tags)
+
+        # Update versions if provided
+        if versions is not None:
+            conn.execute("DELETE FROM resource_versions WHERE resource_id = ?", (resource_id,))
+            if versions:
+                conn.executemany(
+                    "INSERT INTO resource_versions (resource_id, version) VALUES (?, ?)",
+                    [(resource_id, v) for v in versions],
+                )
+
+        # Update timestamp
+        conn.execute(
+            "UPDATE resources SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (resource_id,)
+        )
+
+        conn.commit()
+
+    return True
+
+
 def get_chunk(
     chunk_id: str,
     include_parent: bool = True,
@@ -2256,7 +2670,7 @@ def suggest_rule(
     if tags:
         tags = _resolve_tag_aliases(tags, config)
 
-    rule_id = _generate_id()
+    rule_id = generate_entity_id("rule")
 
     with get_db(config) as conn:
         # Insert rule (approved=False by default)
@@ -2288,6 +2702,72 @@ def suggest_rule(
         conn.commit()
 
     return rule_id
+
+
+def update_rule(
+    rule_id: str,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    rationale: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    config: Optional[Config] = None,
+) -> bool:
+    """Update a rule's metadata.
+
+    Args:
+        rule_id: The rule ID to update.
+        title: New title (optional).
+        content: New content (optional).
+        rationale: New rationale (optional).
+        tags: New tags - replaces existing (optional).
+        config: Configuration to use.
+
+    Returns:
+        True if rule was updated, False if not found.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    # Check if rule exists
+    rule = get_rule(rule_id, config)
+    if rule is None:
+        return False
+
+    # Resolve tag aliases
+    if tags is not None:
+        tags = _resolve_tag_aliases(tags, config)
+
+    with get_db(config) as conn:
+        # Build update query dynamically
+        updates = []
+        params = []
+
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+        if rationale is not None:
+            updates.append("rationale = ?")
+            params.append(rationale)
+
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            query = f"UPDATE rules SET {', '.join(updates)} WHERE id = ?"
+            params.append(rule_id)
+            conn.execute(query, params)
+
+        # Update tags if provided
+        if tags is not None:
+            _delete_tags(conn, rule_id, 'rule')
+            _save_tags(conn, rule_id, 'rule', tags)
+
+        conn.commit()
+
+    return True
 
 
 def get_rule(rule_id: str, config: Optional[Config] = None) -> Optional[Rule]:

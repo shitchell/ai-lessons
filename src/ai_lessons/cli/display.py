@@ -11,7 +11,7 @@ from ..search import SearchResult, ChunkResult, GroupedResourceResult
 def format_lesson(lesson: core.Lesson, verbose: bool = False) -> str:
     """Format a lesson for display."""
     lines = []
-    lines.append(f"[{lesson.id}] {lesson.title}")
+    lines.append(f"[{lesson.id[:15]}...] {lesson.title}")
 
     if lesson.confidence or lesson.source:
         meta = []
@@ -55,13 +55,13 @@ def format_search_result(result: SearchResult, verbose: bool = False) -> str:
         else:
             display_title = f"Chunk #{result.chunk_index}"
 
-        lines.append(f"[chunk] [{result.id}] (score: {result.score:.3f}) {display_title}")
+        lines.append(f"[chunk] [{result.id[:15]}...] (score: {result.score:.3f}) {display_title}")
 
         meta = []
         if result.versions:
             meta.append(f"versions: {', '.join(result.versions)}")
         if result.resource_id:
-            meta.append(f"parent: {result.resource_id[:12]}...")
+            meta.append(f"parent: {result.resource_id[:15]}...")
         if meta:
             lines.append(f"  {' | '.join(meta)}")
 
@@ -83,7 +83,7 @@ def format_search_result(result: SearchResult, verbose: bool = False) -> str:
 
     elif result.result_type == "resource":
         type_indicator = f"[{result.resource_type}]" if result.resource_type else "[resource]"
-        lines.append(f"{type_indicator} [{result.id}] (score: {result.score:.3f}) {result.title}")
+        lines.append(f"{type_indicator} [{result.id[:15]}...] (score: {result.score:.3f}) {result.title}")
 
         meta = []
         if result.versions:
@@ -94,13 +94,13 @@ def format_search_result(result: SearchResult, verbose: bool = False) -> str:
             lines.append(f"  {' | '.join(meta)}")
 
     elif result.result_type == "rule":
-        lines.append(f"[rule] [{result.id}] (score: {result.score:.3f}) {result.title}")
+        lines.append(f"[rule] [{result.id[:15]}...] (score: {result.score:.3f}) {result.title}")
         if result.rationale:
             lines.append(f"  rationale: \"{result.rationale[:100]}{'...' if len(result.rationale) > 100 else ''}\"")
 
     else:
         # Lesson (default)
-        lines.append(f"[{result.id}] (score: {result.score:.3f}) {result.title}")
+        lines.append(f"[{result.id[:15]}...] (score: {result.score:.3f}) {result.title}")
 
         if result.confidence or result.source:
             meta = []
@@ -127,7 +127,7 @@ def format_resource(resource: core.Resource, verbose: bool = False) -> str:
     """Format a resource for display."""
     lines = []
     type_indicator = f"[{resource.type}]" if resource.type else "[resource]"
-    lines.append(f"{type_indicator} [{resource.id}] {resource.title}")
+    lines.append(f"{type_indicator} [{resource.id[:15]}...] {resource.title}")
 
     meta = []
     if resource.versions:
@@ -154,7 +154,7 @@ def format_rule(rule: core.Rule, verbose: bool = False) -> str:
     """Format a rule for display."""
     lines = []
     status = "✓" if rule.approved else "○"
-    lines.append(f"[{status}] [{rule.id}] {rule.title}")
+    lines.append(f"[{status}] [{rule.id[:15]}...] {rule.title}")
 
     if rule.tags:
         lines.append(f"  applies to: {', '.join(rule.tags)}")
@@ -188,12 +188,12 @@ def format_chunk(chunk: core.ResourceChunk, verbose: bool = False) -> str:
     else:
         title = f"Chunk #{chunk.chunk_index}"
 
-    lines.append(f"[chunk] [{chunk.id}] {title}")
+    lines.append(f"[chunk] [{chunk.id[:15]}...] {title}")
 
     # Metadata line
     meta = []
     if chunk.resource_id:
-        meta.append(f"parent: {chunk.resource_id[:12]}...")
+        meta.append(f"parent: {chunk.resource_id[:15]}...")
     if chunk.resource_versions:
         meta.append(f"versions: {', '.join(chunk.resource_versions)}")
     if chunk.start_line is not None and chunk.end_line is not None:

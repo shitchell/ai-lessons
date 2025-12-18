@@ -554,6 +554,18 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
 
         current_version = 11
 
+    if current_version < 12:
+        # v12: Type-prefixed IDs - requires clean slate
+        raise RuntimeError(
+            "I'm sorry Dave, I can't do that.\n\n"
+            "Schema v12 introduces type-prefixed IDs which require a fresh database.\n"
+            "To upgrade:\n"
+            "  1. Delete your database: rm ~/.ai/lessons/knowledge.db\n"
+            "  2. Re-initialize: ai-lessons admin init\n"
+            "  3. Re-import your resources\n\n"
+            "This is a one-time migration during rapid development."
+        )
+
     # Update schema version
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",

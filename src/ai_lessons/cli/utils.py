@@ -89,6 +89,16 @@ def determine_root_dir(paths: list[Path], explicit_root: Optional[str]) -> Path:
     return find_common_ancestor(paths)
 
 
+def warn_deprecation(old_cmd: str, new_cmd: str):
+    """Show a deprecation warning for old commands."""
+    click.secho(
+        f"DEPRECATION WARNING: '{old_cmd}' is deprecated. Use '{new_cmd}' instead.",
+        fg="yellow",
+        err=True,
+    )
+    click.echo()
+
+
 def generate_title(path: Path, root_dir: Path) -> str:
     """Generate a title from a path relative to root_dir.
 
