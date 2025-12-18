@@ -9,8 +9,10 @@ When you (or an AI agent) spend an hour debugging a problem, you learn something
 AI Lessons solves this by providing:
 - **Semantic search** - Find relevant lessons even when you don't remember exact keywords
 - **Hybrid retrieval** - Combines meaning-based and keyword-based search
-- **Graph relationships** - Link related lessons to build a knowledge web
+- **Document chunking** - Intelligently splits large documents for better search results
+- **Graph relationships** - Link related lessons, resources, and rules to build a knowledge web
 - **Multi-agent support** - Works with Claude Code (MCP), custom CLI agents, or direct human use
+- **Type-prefixed IDs** - Instantly recognize entity types (LSN for lessons, RES for resources, etc.)
 
 ## Quick Start
 
@@ -43,6 +45,7 @@ pip install ai-lessons
 ### With OpenAI embeddings (higher quality)
 ```bash
 pip install ai-lessons[openai]
+export OPENAI_API_KEY="your-api-key"
 ```
 
 ### With MCP server (for Claude Code)
@@ -179,6 +182,8 @@ Then Claude can use tools like `learn`, `recall`, `get_lesson`, `link`, etc.
 ## Concepts
 
 ### Lessons
+A lesson captures objective knowledge about causality: "If X, then Y happens."
+
 A lesson has:
 - **Title** - Short, searchable description
 - **Content** - Detailed explanation
@@ -195,7 +200,14 @@ Resources are documents and scripts that complement lessons:
 
 Documents are split into chunks at logical boundaries (headers, delimiters) so searches can find specific sections within large documents. Use `--preview` to see how a document will be chunked before adding.
 
-See [Contributing Resources](docs/contributing/resources/README.md) for detailed documentation on chunking strategies and best practices.
+### Rules
+Rules are prescriptive guidance that require approval:
+- **Title** - What should be done
+- **Content** - How to do it
+- **Rationale** - Why this outcome is desirable (required)
+- **Approved** - Must be approved to surface in searches
+
+Rules only surface when they have tag overlap with the search context, preventing false positives.
 
 ### Confidence Levels
 | Level | Meaning |
@@ -216,11 +228,36 @@ See [Contributing Resources](docs/contributing/resources/README.md) for detailed
 | hearsay | Someone said so |
 
 ### Graph Edges
-Link lessons with relationships:
+Link lessons, resources, and rules with relationships:
 - `related_to` - General relationship
 - `derived_from` - This lesson came from that one
 - `contradicts` - These lessons conflict
 - `supersedes` - This lesson replaces that one
+- `documents` - A resource documents a lesson
+- `references` - Cross-references between resources
+
+## Architecture
+
+### Database
+- SQLite with sqlite-vec extension for vector similarity search
+- Hybrid search combining semantic (vector) and keyword (FTS-like) matching
+- Graph edges support any-to-any relationships between entities
+- Type-prefixed IDs (LSN, RES, RUL) for instant type recognition
+
+### Embeddings
+- Pluggable backend: sentence-transformers (free) or OpenAI (higher quality)
+- Resource-level and chunk-level embeddings for granular retrieval
+- Automatic embedding generation on add/update
+
+### Chunking
+- Intelligent document splitting strategies:
+  - **headers**: Split on markdown headers (h2, h3, etc.)
+  - **delimiter**: Split on custom regex patterns
+  - **fixed**: Fixed-size chunks with overlap
+  - **auto**: Auto-detect best strategy
+  - **single**: Keep small documents as one chunk
+- Preserves document structure with breadcrumbs
+- Handles oversized chunks gracefully
 
 ## Data Location
 
@@ -238,6 +275,8 @@ cd ai-lessons
 pip install -e ".[dev]"
 pytest
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [TECHNICAL.md](TECHNICAL.md) for technical details.
 
 ## License
 
