@@ -489,6 +489,71 @@ def _run_migrations(conn: sqlite3.Connection, config: Config) -> None:
 
         current_version = 10
 
+    if current_version < 11:
+        # v11: Change chunk IDs from ULIDs to <resource_id>.<chunk_index> format
+
+        # 1. Get all existing chunks
+        cursor = conn.execute(
+            "SELECT id, resource_id, chunk_index FROM resource_chunks"
+        )
+        chunks = cursor.fetchall()
+
+        # 2. Build mapping of old ID to new ID
+        id_mapping = {}
+        for chunk in chunks:
+            old_id = chunk["id"]
+            new_id = f"{chunk['resource_id']}.{chunk['chunk_index']}"
+            # Only add to mapping if ID format is changing
+            if old_id != new_id:
+                id_mapping[old_id] = new_id
+
+        # 3. Update chunk IDs in resource_chunks
+        for old_id, new_id in id_mapping.items():
+            conn.execute(
+                "UPDATE resource_chunks SET id = ? WHERE id = ?",
+                (new_id, old_id),
+            )
+
+        # 4. Update chunk_embeddings foreign keys (vec0 doesn't support UPDATE on pk)
+        # Need to delete and re-insert
+        for old_id, new_id in id_mapping.items():
+            # Get the embedding first
+            cursor = conn.execute(
+                "SELECT embedding FROM chunk_embeddings WHERE chunk_id = ?",
+                (old_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                embedding = row["embedding"]
+                conn.execute(
+                    "DELETE FROM chunk_embeddings WHERE chunk_id = ?",
+                    (old_id,),
+                )
+                conn.execute(
+                    "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
+                    (new_id, embedding),
+                )
+
+        # 5. Update edges table (to_id where to_type='chunk', from_id where from_type='chunk')
+        for old_id, new_id in id_mapping.items():
+            conn.execute(
+                "UPDATE edges SET to_id = ? WHERE to_id = ? AND to_type = 'chunk'",
+                (new_id, old_id),
+            )
+            conn.execute(
+                "UPDATE edges SET from_id = ? WHERE from_id = ? AND from_type = 'chunk'",
+                (new_id, old_id),
+            )
+
+        # 6. Update resource_anchors (from_id where from_type='chunk')
+        for old_id, new_id in id_mapping.items():
+            conn.execute(
+                "UPDATE resource_anchors SET from_id = ? WHERE from_id = ? AND from_type = 'chunk'",
+                (new_id, old_id),
+            )
+
+        current_version = 11
+
     # Update schema version
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",

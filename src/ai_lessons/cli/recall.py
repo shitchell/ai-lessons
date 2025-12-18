@@ -11,9 +11,11 @@ import click
 from .. import core
 from ..config import get_config
 from ..db import get_db
-from ..search import search_resources
+from ..search import search_resources, search_resources_grouped, search_rules
+from ..chunk_ids import is_chunk_id
 from .display import (
     format_chunk,
+    format_grouped_search_results,
     format_lesson,
     format_resource,
     format_rule,
@@ -34,7 +36,89 @@ def _after_recall_command(*args, **kwargs):
     show_feedback_reminder()
 
 
-@recall.command()
+@recall.command("search")
+@click.argument("query")
+@click.option("--tags", help="Filter by comma-separated tags")
+@click.option("--limit", "-n", default=10, help="Maximum results per type")
+@click.option("--verbose", "-v", is_flag=True, help="Show content preview")
+@click.option("--grouped", "-g", is_flag=True, help="Group resource chunks by parent")
+def search(
+    query: str,
+    tags: Optional[str],
+    limit: int,
+    verbose: bool,
+    grouped: bool,
+):
+    """Search across lessons, resources, and rules.
+
+    This unified search finds relevant content across all knowledge types:
+    - Lessons: Short-form knowledge and tips
+    - Resources: Documentation and scripts (searched by chunks)
+    - Rules: Approved coding standards and guidelines
+    """
+    tag_list = parse_tags(tags)
+    has_results = False
+
+    # Search lessons
+    lessons = core.recall(
+        query=query,
+        tags=tag_list,
+        limit=limit,
+    )
+    if lessons:
+        has_results = True
+        click.echo(f"=== Lessons ({len(lessons)}) ===")
+        click.echo()
+        for result in lessons:
+            click.echo(format_search_result(result, verbose))
+            click.echo()
+
+    # Search resources (chunks)
+    if grouped:
+        top_matches, grouped_results = search_resources_grouped(
+            query=query,
+            tag_filter=tag_list,
+            limit=limit,
+        )
+        if grouped_results:
+            has_results = True
+            click.echo(f"=== Resources ({len(grouped_results)} resources, {len(top_matches)} top chunks) ===")
+            click.echo()
+            click.echo(format_grouped_search_results(top_matches, grouped_results))
+            click.echo()
+    else:
+        resources = search_resources(
+            query=query,
+            tag_filter=tag_list,
+            limit=limit,
+        )
+        if resources:
+            has_results = True
+            click.echo(f"=== Resources ({len(resources)}) ===")
+            click.echo()
+            for result in resources:
+                click.echo(format_search_result(result, verbose))
+                click.echo()
+
+    # Search rules
+    rules = search_rules(
+        query=query,
+        tag_filter=tag_list,
+        limit=limit,
+    )
+    if rules:
+        has_results = True
+        click.echo(f"=== Rules ({len(rules)}) ===")
+        click.echo()
+        for result in rules:
+            click.echo(format_search_result(result, verbose))
+            click.echo()
+
+    if not has_results:
+        click.echo("No results found.")
+
+
+@recall.command("search-lesson")
 @click.argument("query")
 @click.option("--tags", help="Filter by comma-separated tags")
 @click.option("--context", help="Filter by context")
@@ -43,7 +127,7 @@ def _after_recall_command(*args, **kwargs):
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.option("--strategy", type=click.Choice(["hybrid", "semantic", "keyword"]), default="hybrid")
 @click.option("--verbose", "-v", is_flag=True, help="Show content preview")
-def search(
+def search_lesson(
     query: str,
     tags: Optional[str],
     context: Optional[str],
@@ -74,23 +158,60 @@ def search(
 
 
 @recall.command()
-@click.argument("lesson_id")
-def show(lesson_id: str):
-    """Show a lesson by ID."""
-    lesson = core.get_lesson(lesson_id)
+@click.argument("id")
+@click.option("--verbose", "-v", is_flag=True, default=True, help="Show full content")
+def show(id: str, verbose: bool):
+    """Show a resource, chunk, or lesson by ID.
 
-    if lesson is None:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
+    IDs with a .N suffix are chunks (e.g., ABC123.5).
+    IDs without a suffix are resources or lessons.
+    """
+    if is_chunk_id(id):
+        # Chunk ID (has .N suffix)
+        chunk = core.get_chunk(id)
+        if chunk is None:
+            click.echo(f"Chunk not found: {id}", err=True)
+            sys.exit(1)
+        click.echo(format_chunk(chunk, verbose=verbose))
 
-    click.echo(format_lesson(lesson, verbose=True))
+        # Show linked resources
+        links = core.get_chunk_links(id)
+        if links:
+            click.echo()
+            click.echo("---")
+            click.echo("Linked resources:")
+            for link in links:
+                if link.resolved_resource_id:
+                    resource = core.get_resource(link.resolved_resource_id)
+                    if resource:
+                        target = f"[{link.resolved_resource_id[:12]}...] {resource.title}"
+                    else:
+                        target = f"[{link.resolved_resource_id[:12]}...] (deleted)"
+                else:
+                    target = "(not imported)"
+                fragment = f"#{link.to_fragment}" if link.to_fragment else ""
+                click.echo(f"  [{link.link_text}](...{fragment}) -> {target}")
+    else:
+        # Try resource first, then lesson (for backwards compatibility)
+        resource = core.get_resource(id)
+        if resource is not None:
+            click.echo(format_resource(resource, verbose=verbose))
+        else:
+            # Fall back to lesson
+            lesson = core.get_lesson(id)
+            if lesson is not None:
+                click.echo(format_lesson(lesson, verbose=verbose))
+            else:
+                click.echo(f"Not found: {id}", err=True)
+                click.echo("(checked: resource, lesson)", err=True)
+                sys.exit(1)
 
 
-@recall.command()
+@recall.command("related-lesson")
 @click.argument("lesson_id")
 @click.option("--depth", "-d", default=1, help="Traversal depth")
 @click.option("--relation", "-r", multiple=True, help="Filter by relation type")
-def related(lesson_id: str, depth: int, relation: tuple):
+def related_lesson(lesson_id: str, depth: int, relation: tuple):
     """Show lessons related to a given lesson."""
     lessons = core.get_related(
         lesson_id=lesson_id,
@@ -157,6 +278,7 @@ def list_confidence():
 @click.option("--tags", help="Filter by comma-separated tags")
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.option("--verbose", "-v", is_flag=True, help="Show content preview")
+@click.option("--grouped", "-g", is_flag=True, help="Group chunks by resource")
 def search_resources_cmd(
     query: str,
     resource_type: Optional[str],
@@ -164,74 +286,62 @@ def search_resources_cmd(
     tags: Optional[str],
     limit: int,
     verbose: bool,
+    grouped: bool,
 ):
     """Search for resources (docs and scripts)."""
-    results = search_resources(
-        query=query,
-        resource_type=resource_type,
-        versions=list(versions) if versions else None,
-        tag_filter=parse_tags(tags),
-        limit=limit,
-    )
+    if grouped:
+        # Use grouped search and display
+        top_matches, grouped_results = search_resources_grouped(
+            query=query,
+            resource_type=resource_type,
+            versions=list(versions) if versions else None,
+            tag_filter=parse_tags(tags),
+            limit=limit,
+        )
 
-    if not results:
-        click.echo("No resources found.")
-        return
+        if not grouped_results:
+            click.echo("No resources found.")
+            return
 
-    for result in results:
-        click.echo(format_search_result(result, verbose))
-        click.echo()
+        click.echo(format_grouped_search_results(top_matches, grouped_results))
+    else:
+        # Use flat search and display (backwards compatible)
+        results = search_resources(
+            query=query,
+            resource_type=resource_type,
+            versions=list(versions) if versions else None,
+            tag_filter=parse_tags(tags),
+            limit=limit,
+        )
+
+        if not results:
+            click.echo("No resources found.")
+            return
+
+        for result in results:
+            click.echo(format_search_result(result, verbose))
+            click.echo()
 
 
 @recall.command("show-resource")
 @click.argument("resource_id")
-def show_resource(resource_id: str):
-    """Show a resource by ID."""
-    resource = core.get_resource(resource_id)
-
-    if resource is None:
-        click.echo(f"Resource not found: {resource_id}", err=True)
-        sys.exit(1)
-
-    click.echo(format_resource(resource, verbose=True))
+@click.pass_context
+def show_resource(ctx, resource_id: str):
+    """Show a resource by ID (alias for 'show')."""
+    ctx.invoke(show, id=resource_id)
 
 
 @recall.command("show-chunk")
 @click.argument("chunk_id")
-def show_chunk(chunk_id: str):
-    """Show a resource chunk by ID."""
-    chunk = core.get_chunk(chunk_id)
-
-    if chunk is None:
-        click.echo(f"Chunk not found: {chunk_id}", err=True)
-        sys.exit(1)
-
-    click.echo(format_chunk(chunk, verbose=True))
-
-    # Show linked resources
-    links = core.get_chunk_links(chunk_id)
-    if links:
-        click.echo()
-        click.echo("---")
-        click.echo("Linked resources:")
-        for link in links:
-            if link.resolved_resource_id:
-                resource = core.get_resource(link.resolved_resource_id)
-                if resource:
-                    target = f"[{link.resolved_resource_id[:12]}...] {resource.title}"
-                else:
-                    target = f"[{link.resolved_resource_id[:12]}...] (deleted)"
-            else:
-                target = "(not imported)"
-
-            # Show original link syntax
-            fragment = f"#{link.to_fragment}" if link.to_fragment else ""
-            click.echo(f"  [{link.link_text}](...{fragment}) -> {target}")
+@click.pass_context
+def show_chunk(ctx, chunk_id: str):
+    """Show a resource chunk by ID (alias for 'show')."""
+    ctx.invoke(show, id=chunk_id)
 
 
-@recall.command("related")
+@recall.command("related-resource")
 @click.argument("resource_id")
-def show_related(resource_id: str):
+def related_resource(resource_id: str):
     """Show resources related to the given resource via links.
 
     Displays both outgoing links (from this resource) and incoming links

@@ -20,7 +20,7 @@ def contribute():
     pass
 
 
-@contribute.command()
+@contribute.command("add-lesson")
 @click.option("--title", "-t", required=True, help="Lesson title")
 @click.option("--content", "-c", help="Lesson content (or use stdin)")
 @click.option("--tags", help="Comma-separated tags")
@@ -79,7 +79,7 @@ def add(
         click.echo(f"  Linked to {len(linked_resources)} resource(s)")
 
 
-@contribute.command()
+@contribute.command("update-lesson")
 @click.argument("lesson_id")
 @click.option("--title", "-t", help="New title")
 @click.option("--content", "-c", help="New content")
@@ -87,7 +87,7 @@ def add(
 @click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
 @click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
 @click.option("--source-notes", help="New source notes")
-def update(
+def update_lesson(
     lesson_id: str,
     title: Optional[str],
     content: Optional[str],
@@ -114,10 +114,10 @@ def update(
         sys.exit(1)
 
 
-@contribute.command()
+@contribute.command("delete-lesson")
 @click.argument("lesson_id")
 @click.confirmation_option(prompt="Are you sure you want to delete this lesson?")
-def delete(lesson_id: str):
+def delete_lesson(lesson_id: str):
     """Delete a lesson."""
     success = core.delete_lesson(lesson_id)
 
@@ -128,11 +128,11 @@ def delete(lesson_id: str):
         sys.exit(1)
 
 
-@contribute.command()
+@contribute.command("link-lesson")
 @click.argument("from_id")
 @click.argument("to_id")
 @click.option("--relation", "-r", required=True, help="Relationship type (e.g., related_to, derived_from)")
-def link(from_id: str, to_id: str, relation: str):
+def link_lesson(from_id: str, to_id: str, relation: str):
     """Create a link between two lessons."""
     success = core.link_lessons(from_id, to_id, relation)
 
@@ -143,11 +143,11 @@ def link(from_id: str, to_id: str, relation: str):
         sys.exit(1)
 
 
-@contribute.command()
+@contribute.command("unlink-lesson")
 @click.argument("from_id")
 @click.argument("to_id")
 @click.option("--relation", "-r", help="Specific relation to remove (all if not specified)")
-def unlink(from_id: str, to_id: str, relation: Optional[str]):
+def unlink_lesson(from_id: str, to_id: str, relation: Optional[str]):
     """Remove link(s) between two lessons."""
     count = core.unlink_lessons(from_id, to_id, relation)
     click.echo(f"Removed {count} link(s)")

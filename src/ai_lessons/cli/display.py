@@ -5,7 +5,7 @@ from __future__ import annotations
 import click
 
 from .. import core
-from ..search import SearchResult
+from ..search import SearchResult, ChunkResult, GroupedResourceResult
 
 
 def format_lesson(lesson: core.Lesson, verbose: bool = False) -> str:
@@ -215,6 +215,67 @@ def format_chunk(chunk: core.ResourceChunk, verbose: bool = False) -> str:
         lines.append(chunk.content)
 
     return "\n".join(lines)
+
+
+def format_grouped_search_results(
+    top_matches: list[ChunkResult],
+    grouped: list[GroupedResourceResult],
+    show_top_n: int = 3,
+) -> str:
+    """Format grouped search results for display.
+
+    Args:
+        top_matches: Top N chunks across all resources.
+        grouped: Resources with their matching chunks.
+        show_top_n: Number of top matches to show in summary.
+
+    Output format:
+    ```
+    Top matches: README.md.58 (0.87), AnnouncementBannerApi.md.1 (0.75)
+
+    README.md (v3) [jira, api]
+      .58 (0.87) Authorization > OAuth2
+      .62 (0.81) basicAuth
+
+    AnnouncementBannerApi.md (v3) [jira, api]
+      .1  (0.75) getBanner
+      .3  (0.68) setBanner
+    ```
+    """
+    lines = []
+
+    # Top matches summary
+    if top_matches:
+        top_summaries = []
+        for chunk in top_matches[:show_top_n]:
+            # Show chunk index and score
+            top_summaries.append(f".{chunk.chunk_index} ({chunk.score:.2f})")
+        lines.append(f"Top matches: {', '.join(top_summaries)}")
+        lines.append("")
+
+    # Grouped resources
+    for group in grouped:
+        # Resource header: title (versions) [tags]
+        header_parts = [group.resource_title]
+        if group.versions:
+            header_parts.append(f"({', '.join(group.versions)})")
+        if group.tags:
+            header_parts.append(f"[{', '.join(group.tags[:3])}]")
+        lines.append(" ".join(header_parts))
+
+        # Chunks under this resource
+        if group.chunks:
+            for chunk in group.chunks:
+                # Format: .N (score) title
+                title = chunk.title or chunk.breadcrumb or f"chunk {chunk.chunk_index}"
+                lines.append(f"  .{chunk.chunk_index:<3} ({chunk.score:.2f}) {title}")
+        else:
+            # Resource matched but no specific chunk matches
+            lines.append(f"  (best score: {group.best_score:.2f})")
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 def display_chunking_preview(result) -> None:

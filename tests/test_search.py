@@ -369,3 +369,70 @@ class TestResultDataclasses:
         assert result.breadcrumb == "Parent > Child"
         assert result.resource_id == "res1"
         assert result.sections == ["Sec1"]
+
+
+class TestGroupedResourceResult:
+    """Test GroupedResourceResult dataclass."""
+
+    def test_grouped_result_creation(self):
+        """GroupedResourceResult should be creatable with expected fields."""
+        from ai_lessons.search import GroupedResourceResult
+
+        chunk1 = ChunkResult(
+            id="res1.0", title="Chunk 0", content="Content 0", score=0.9, result_type="",
+            chunk_index=0, resource_id="res1",
+        )
+        chunk2 = ChunkResult(
+            id="res1.1", title="Chunk 1", content="Content 1", score=0.7, result_type="",
+            chunk_index=1, resource_id="res1",
+        )
+
+        result = GroupedResourceResult(
+            resource_id="res1",
+            resource_title="Test Resource",
+            resource_type="doc",
+            versions=["v3"],
+            tags=["api", "jira"],
+            path="/path/to/doc.md",
+            best_score=0.9,
+            chunks=[chunk1, chunk2],
+        )
+
+        assert result.resource_id == "res1"
+        assert result.resource_title == "Test Resource"
+        assert result.resource_type == "doc"
+        assert result.best_score == 0.9
+        assert result.chunk_count == 2
+        assert len(result.chunks) == 2
+
+    def test_chunk_count_property(self):
+        """chunk_count property should return len(chunks)."""
+        from ai_lessons.search import GroupedResourceResult
+
+        result = GroupedResourceResult(
+            resource_id="res1",
+            resource_title="Test",
+            resource_type="doc",
+            versions=[],
+            tags=[],
+            path=None,
+            best_score=0.5,
+            chunks=[],
+        )
+        assert result.chunk_count == 0
+
+        chunk = ChunkResult(
+            id="res1.0", title="Chunk", content="Content", score=0.5, result_type="",
+            chunk_index=0, resource_id="res1",
+        )
+        result = GroupedResourceResult(
+            resource_id="res1",
+            resource_title="Test",
+            resource_type="doc",
+            versions=[],
+            tags=[],
+            path=None,
+            best_score=0.5,
+            chunks=[chunk],
+        )
+        assert result.chunk_count == 1

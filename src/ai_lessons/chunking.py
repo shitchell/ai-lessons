@@ -155,9 +155,9 @@ def detect_strategy(content: str, config: ChunkingConfig) -> tuple[str, str]:
     """
     tokens = estimate_tokens(content)
 
-    # Small documents: no chunking needed
+    # Small documents: create single chunk with full content
     if tokens < config.min_chunk_size * 2:
-        return "none", f"document too small ({tokens} tokens)"
+        return "single", f"document small enough for single chunk ({tokens} tokens)"
 
     # Check for markdown headers
     header_pattern = r"^#{1,6}\s+.+$"
@@ -588,6 +588,9 @@ def chunk_document(
     # Dispatch to strategy implementation
     if strategy == "none":
         chunks = [_whole_document_chunk(content)]
+    elif strategy == "single":
+        # Single chunk for small documents - same as "none" but semantically different
+        chunks = [_whole_document_chunk(content)]
     elif strategy == "headers":
         chunks = chunk_by_headers(content, config)
     elif strategy == "delimiter":
@@ -597,12 +600,12 @@ def chunk_document(
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
-    # Post-process: handle oversized chunks (only if not 'none')
-    if strategy != "none":
+    # Post-process: handle oversized chunks (skip for 'none' and 'single')
+    if strategy not in ("none", "single"):
         chunks = _handle_oversized(chunks, config)
 
-    # Post-process: merge undersized chunks (only if not 'none')
-    if strategy != "none":
+    # Post-process: merge undersized chunks (skip for 'none' and 'single')
+    if strategy not in ("none", "single"):
         chunks = _handle_undersized(chunks, config)
 
     # Add warnings

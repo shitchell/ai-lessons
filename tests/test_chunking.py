@@ -38,11 +38,11 @@ class TestStrategyDetection:
     """Test strategy auto-detection."""
 
     def test_detect_small_document(self):
-        """Small documents should use 'none' strategy."""
+        """Small documents should use 'single' strategy (not 'none')."""
         content = "Short doc"
         strategy, reason = detect_strategy(content, ChunkingConfig())
-        assert strategy == "none"
-        assert "too small" in reason
+        assert strategy == "single"
+        assert "single chunk" in reason
 
     def test_detect_markdown_headers(self):
         """Documents with headers should use 'headers' strategy."""
@@ -394,13 +394,15 @@ Even more content to ensure we have enough tokens.
         assert result.strategy == "headers"
         assert "markdown headers" in result.strategy_reason
 
-    def test_none_strategy_for_small_doc(self):
-        """Test that small docs use 'none' strategy."""
+    def test_single_strategy_for_small_doc(self):
+        """Test that small docs use 'single' strategy and still get one chunk."""
         content = "Small document."
         result = chunk_document(content)
 
-        assert result.strategy == "none"
+        assert result.strategy == "single"
         assert len(result.chunks) == 1
+        assert result.chunks[0].content == content
+        assert result.chunks[0].index == 0
 
     def test_result_metadata(self):
         """Test that result contains correct metadata."""

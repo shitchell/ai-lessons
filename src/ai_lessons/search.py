@@ -106,6 +106,24 @@ class RuleResult(SearchResult):
         self.result_type = "rule"
 
 
+@dataclass
+class GroupedResourceResult:
+    """A resource with its matching chunks for grouped search display."""
+    resource_id: str
+    resource_title: str
+    resource_type: str  # 'doc' or 'script'
+    versions: list[str]
+    tags: list[str]
+    path: Optional[str]
+    best_score: float  # Highest chunk score (or resource-level score if no chunks)
+    chunks: list[ChunkResult]  # Matching chunks, sorted by score descending
+
+    @property
+    def chunk_count(self) -> int:
+        """Number of matching chunks."""
+        return len(self.chunks)
+
+
 # --- Helper Functions ---
 
 
@@ -924,6 +942,180 @@ def _process_chunk_row(
         resource_type=row["resource_type"],
         path=row["resource_path"],
     )
+
+
+def search_resources_grouped(
+    query: str,
+    limit: int = 10,
+    resource_type: Optional[str] = None,
+    versions: Optional[list[str]] = None,
+    tag_filter: Optional[list[str]] = None,
+    top_chunks_count: int = 5,
+    config: Optional[Config] = None,
+) -> tuple[list[ChunkResult], list[GroupedResourceResult]]:
+    """Search resources and return grouped results with top matches.
+
+    Unlike search_resources() which deduplicates to one result per resource,
+    this function returns ALL matching chunks grouped by their parent resource,
+    plus a summary of the top N chunks across all resources.
+
+    Args:
+        query: Search query.
+        limit: Maximum number of resources to return.
+        resource_type: Filter by 'doc' or 'script'.
+        versions: Filter by versions.
+        tag_filter: Filter by tags.
+        top_chunks_count: Number of top chunks to return in the summary.
+        config: Configuration.
+
+    Returns:
+        Tuple of (top_chunks, grouped_resources):
+        - top_chunks: Top N chunks across all resources, sorted by score
+        - grouped_resources: Resources with their matching chunks, sorted by best chunk score
+    """
+    if config is None:
+        config = get_config()
+
+    import struct
+
+    query_embedding = embed_text(query, config)
+    embedding_blob = struct.pack(f"{len(query_embedding)}f", *query_embedding)
+    query_versions = set(versions) if versions else set()
+
+    with get_db(config) as conn:
+        # Collect ALL chunk results (not deduplicated)
+        all_chunks: list[ChunkResult] = []
+
+        # Track resources that matched at resource-level but not chunk-level
+        resource_level_matches: dict[str, ResourceResult] = {}
+
+        # --- Search chunk embeddings first (primary) ---
+        chunk_sql = """
+            SELECT c.*, ce.distance, r.id as resource_id, r.title as resource_title,
+                   r.type as resource_type, r.path as resource_path
+            FROM resource_chunks c
+            JOIN chunk_embeddings ce ON c.id = ce.chunk_id
+            JOIN resources r ON c.resource_id = r.id
+            WHERE ce.embedding MATCH ?
+            AND k = ?
+        """
+        chunk_params: list = [embedding_blob, limit * 10]
+
+        if resource_type:
+            chunk_sql += " AND r.type = ?"
+            chunk_params.append(resource_type)
+
+        if tag_filter:
+            placeholders = ",".join("?" * len(tag_filter))
+            chunk_sql += f"""
+                AND r.id IN (
+                    SELECT resource_id FROM resource_tags
+                    WHERE tag IN ({placeholders})
+                )
+            """
+            chunk_params.extend(tag_filter)
+
+        chunk_sql += " ORDER BY ce.distance LIMIT ?"
+        chunk_params.append(limit * 10)
+
+        cursor = conn.execute(chunk_sql, chunk_params)
+        chunk_rows = cursor.fetchall()
+
+        resources_with_chunks: set[str] = set()
+        for chunk_row in chunk_rows:
+            result = _process_chunk_row(conn, chunk_row, query_versions, query)
+            if result:
+                all_chunks.append(result)
+                resources_with_chunks.add(result.resource_id)
+
+        # --- Search resource embeddings for resources without chunk matches ---
+        resource_sql = """
+            SELECT r.*, re.distance
+            FROM resources r
+            JOIN resource_embeddings re ON r.id = re.resource_id
+            WHERE re.embedding MATCH ?
+            AND k = ?
+        """
+        resource_params: list = [embedding_blob, limit * 3]
+
+        if resource_type:
+            resource_sql += " AND r.type = ?"
+            resource_params.append(resource_type)
+
+        if tag_filter:
+            placeholders = ",".join("?" * len(tag_filter))
+            resource_sql += f"""
+                AND r.id IN (
+                    SELECT resource_id FROM resource_tags
+                    WHERE tag IN ({placeholders})
+                )
+            """
+            resource_params.extend(tag_filter)
+
+        resource_sql += " ORDER BY re.distance LIMIT ?"
+        resource_params.append(limit * 3)
+
+        cursor = conn.execute(resource_sql, resource_params)
+        resource_rows = cursor.fetchall()
+
+        for row in resource_rows:
+            if row["id"] not in resources_with_chunks:
+                result = _process_resource_row(conn, row, query_versions, tag_filter, query)
+                if result:
+                    resource_level_matches[result.id] = result
+
+        # --- Group chunks by resource ---
+        chunks_by_resource: dict[str, list[ChunkResult]] = {}
+        for chunk in all_chunks:
+            if chunk.resource_id not in chunks_by_resource:
+                chunks_by_resource[chunk.resource_id] = []
+            chunks_by_resource[chunk.resource_id].append(chunk)
+
+        # Sort chunks within each resource by score
+        for chunks in chunks_by_resource.values():
+            chunks.sort(key=lambda x: x.score, reverse=True)
+
+        # --- Build grouped results ---
+        grouped_results: list[GroupedResourceResult] = []
+
+        # Resources with chunk matches
+        for resource_id, chunks in chunks_by_resource.items():
+            if not chunks:
+                continue
+            first_chunk = chunks[0]  # Best scoring chunk
+            grouped_results.append(GroupedResourceResult(
+                resource_id=resource_id,
+                resource_title=first_chunk.resource_title or "",
+                resource_type=first_chunk.resource_type or "doc",
+                versions=first_chunk.versions,
+                tags=first_chunk.tags,
+                path=first_chunk.path,
+                best_score=first_chunk.score,
+                chunks=chunks,
+            ))
+
+        # Resources with only resource-level matches (no specific chunk match)
+        for resource_id, result in resource_level_matches.items():
+            grouped_results.append(GroupedResourceResult(
+                resource_id=resource_id,
+                resource_title=result.title,
+                resource_type=result.resource_type or "doc",
+                versions=result.versions,
+                tags=result.tags,
+                path=result.path,
+                best_score=result.score,
+                chunks=[],  # No specific chunk matched
+            ))
+
+        # Sort grouped results by best_score
+        grouped_results.sort(key=lambda x: x.best_score, reverse=True)
+        grouped_results = grouped_results[:limit]
+
+        # Get top chunks across all resources
+        all_chunks.sort(key=lambda x: x.score, reverse=True)
+        top_chunks = all_chunks[:top_chunks_count]
+
+        return top_chunks, grouped_results
 
 
 # --- v2: Unified Search ---

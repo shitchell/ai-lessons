@@ -926,8 +926,8 @@ Content.
             )
             assert cursor.fetchone()[0] == 0
 
-    def test_script_no_chunks(self, temp_config):
-        """Test that scripts don't create chunks."""
+    def test_script_gets_chunks(self, temp_config):
+        """Test that scripts get chunked like docs (at least 1 chunk)."""
         import tempfile
         from ai_lessons.db import get_db
 
@@ -938,7 +938,7 @@ Content.
         try:
             resource_id = core.add_resource(
                 type="script",
-                title="Script No Chunks",
+                title="Script Gets Chunks",
                 path=script_path,
                 config=temp_config,
             )
@@ -948,7 +948,8 @@ Content.
                     "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?",
                     (resource_id,),
                 )
-                assert cursor.fetchone()[0] == 0
+                # Scripts now get at least 1 chunk (v5-chunk-ids change)
+                assert cursor.fetchone()[0] >= 1
         finally:
             import os
             os.unlink(script_path)

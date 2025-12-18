@@ -24,6 +24,7 @@ from .links import (
     resolve_fragment_to_chunk,
     resolve_link_to_resource,
 )
+from .chunk_ids import generate_chunk_id, parse_chunk_id
 from .search import SearchResult, hybrid_search, keyword_search, vector_search
 
 if TYPE_CHECKING:
@@ -1328,7 +1329,7 @@ def _store_chunks(
     stored_chunks: list[tuple[str, Chunk]] = []
 
     for chunk in result.chunks:
-        chunk_id = _generate_id()
+        chunk_id = generate_chunk_id(resource_id, chunk.index)
         stored_chunks.append((chunk_id, chunk))
 
         # Serialize sections to JSON
@@ -1668,10 +1669,8 @@ def add_resource(
         # Insert embedding
         _store_embedding(conn, resource_id, 'resource', f"{title}\n\n{content}", config)
 
-        # Chunk and store chunks for docs
-        stored_chunks = []
-        if type == 'doc':
-            stored_chunks = _store_chunks(conn, resource_id, content, path, chunking_config, config)
+        # Chunk and store chunks for ALL resources (docs and scripts)
+        stored_chunks = _store_chunks(conn, resource_id, content, path, chunking_config, config)
 
         # Extract and resolve links (for docs with path)
         if type == 'doc' and path:
@@ -1766,10 +1765,8 @@ def _reimport_resource(
         _delete_embedding(conn, existing_id, 'resource')
         _store_embedding(conn, existing_id, 'resource', f"{title}\n\n{content}", config)
 
-        # Re-chunk and store
-        stored_chunks = []
-        if type == 'doc':
-            stored_chunks = _store_chunks(conn, existing_id, content, path, chunking_config, config)
+        # Re-chunk and store (for ALL resources - docs and scripts)
+        stored_chunks = _store_chunks(conn, existing_id, content, path, chunking_config, config)
 
         # Re-extract and resolve links
         if type == 'doc' and path:
@@ -1990,7 +1987,7 @@ def get_chunk(
     """Get a chunk by ID.
 
     Args:
-        chunk_id: The chunk ID.
+        chunk_id: The chunk ID in format "<resource_id>.<chunk_index>".
         include_parent: Include parent resource metadata (title, versions, tags).
         config: Configuration to use.
 
@@ -2002,11 +1999,17 @@ def get_chunk(
 
     ensure_initialized(config)
 
+    # Parse chunk ID to get resource_id and chunk_index
+    parsed = parse_chunk_id(chunk_id)
+    if parsed is None:
+        # Invalid chunk ID format
+        return None
+
     with get_db(config) as conn:
-        # Get chunk
+        # Get chunk by resource_id and chunk_index
         cursor = conn.execute(
-            "SELECT * FROM resource_chunks WHERE id = ?",
-            (chunk_id,),
+            "SELECT * FROM resource_chunks WHERE resource_id = ? AND chunk_index = ?",
+            (parsed.resource_id, parsed.chunk_index),
         )
         row = cursor.fetchone()
         if row is None:
