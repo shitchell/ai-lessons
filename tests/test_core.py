@@ -5,13 +5,14 @@ import pytest
 from ai_lessons import core
 
 
-# temp_config fixture is provided by conftest.py
+# fast_config fixture is provided by conftest.py
+# temp_config is used for tests requiring real semantic search
 
 
 class TestCRUD:
     """Test CRUD operations."""
 
-    def test_add_lesson(self, temp_config):
+    def test_add_lesson(self, fast_config):
         """Test adding a lesson."""
         lesson_id = core.add_lesson(
             title="Test Lesson",
@@ -19,23 +20,23 @@ class TestCRUD:
             tags=["test", "example"],
             confidence="medium",
             source="tested",
-            config=temp_config,
+            config=fast_config,
         )
 
         assert lesson_id is not None
         assert len(lesson_id) > 0
 
-    def test_get_lesson(self, temp_config):
+    def test_get_lesson(self, fast_config):
         """Test getting a lesson by ID."""
         lesson_id = core.add_lesson(
             title="Get Test",
             content="Content for get test.",
             tags=["get", "test"],
             confidence="high",
-            config=temp_config,
+            config=fast_config,
         )
 
-        lesson = core.get_lesson(lesson_id, config=temp_config)
+        lesson = core.get_lesson(lesson_id, config=fast_config)
 
         assert lesson is not None
         assert lesson.id == lesson_id
@@ -45,53 +46,53 @@ class TestCRUD:
         assert "test" in lesson.tags
         assert lesson.confidence == "high"
 
-    def test_get_nonexistent_lesson(self, temp_config):
+    def test_get_nonexistent_lesson(self, fast_config):
         """Test getting a lesson that doesn't exist."""
-        lesson = core.get_lesson("nonexistent-id", config=temp_config)
+        lesson = core.get_lesson("nonexistent-id", config=fast_config)
         assert lesson is None
 
-    def test_update_lesson(self, temp_config):
+    def test_update_lesson(self, fast_config):
         """Test updating a lesson."""
         lesson_id = core.add_lesson(
             title="Original Title",
             content="Original content.",
             tags=["original"],
-            config=temp_config,
+            config=fast_config,
         )
 
         success = core.update_lesson(
             lesson_id=lesson_id,
             title="Updated Title",
             tags=["updated"],
-            config=temp_config,
+            config=fast_config,
         )
 
         assert success is True
 
-        lesson = core.get_lesson(lesson_id, config=temp_config)
+        lesson = core.get_lesson(lesson_id, config=fast_config)
         assert lesson.title == "Updated Title"
         assert "updated" in lesson.tags
         assert "original" not in lesson.tags
 
-    def test_delete_lesson(self, temp_config):
+    def test_delete_lesson(self, fast_config):
         """Test deleting a lesson."""
         lesson_id = core.add_lesson(
             title="To Delete",
             content="This will be deleted.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        success = core.delete_lesson(lesson_id, config=temp_config)
+        success = core.delete_lesson(lesson_id, config=fast_config)
         assert success is True
 
-        lesson = core.get_lesson(lesson_id, config=temp_config)
+        lesson = core.get_lesson(lesson_id, config=fast_config)
         assert lesson is None
 
 
 class TestSearch:
     """Test search functionality."""
 
-    def test_recall_finds_lesson(self, temp_config):
+    def test_recall_finds_lesson(self, fast_config):
         """Test that recall can find a lesson."""
         core.add_lesson(
             title="Jira workflow updates delete missing statuses",
@@ -99,37 +100,37 @@ class TestSearch:
             tags=["jira", "api", "gotcha"],
             confidence="high",
             source="tested",
-            config=temp_config,
+            config=fast_config,
         )
 
         results = core.recall(
             query="jira workflow update",
-            config=temp_config,
+            config=fast_config,
         )
 
         assert len(results) > 0
         assert "jira" in results[0].title.lower() or "workflow" in results[0].title.lower()
 
-    def test_recall_with_tag_filter(self, temp_config):
+    def test_recall_with_tag_filter(self, fast_config):
         """Test recall with tag filtering."""
         core.add_lesson(
             title="Python debugging tip",
             content="Use pdb.set_trace() for debugging.",
             tags=["python", "debugging"],
-            config=temp_config,
+            config=fast_config,
         )
 
         core.add_lesson(
             title="JavaScript debugging tip",
             content="Use console.log() for debugging.",
             tags=["javascript", "debugging"],
-            config=temp_config,
+            config=fast_config,
         )
 
         results = core.recall(
             query="debugging",
             tags=["python"],
-            config=temp_config,
+            config=fast_config,
         )
 
         assert len(results) > 0
@@ -139,40 +140,40 @@ class TestSearch:
 class TestGraph:
     """Test graph operations."""
 
-    def test_link_lessons(self, temp_config):
+    def test_link_lessons(self, fast_config):
         """Test linking two lessons."""
         id1 = core.add_lesson(
             title="Lesson 1",
             content="First lesson.",
-            config=temp_config,
+            config=fast_config,
         )
 
         id2 = core.add_lesson(
             title="Lesson 2",
             content="Second lesson.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        success = core.link_lessons(id1, id2, "related_to", config=temp_config)
+        success = core.link_lessons(id1, id2, "related_to", config=fast_config)
         assert success is True
 
-    def test_get_related(self, temp_config):
+    def test_get_related(self, fast_config):
         """Test getting related lessons."""
         id1 = core.add_lesson(
             title="Parent Lesson",
             content="This is the parent.",
-            config=temp_config,
+            config=fast_config,
         )
 
         id2 = core.add_lesson(
             title="Child Lesson",
             content="This is the child.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        core.link_lessons(id1, id2, "related_to", config=temp_config)
+        core.link_lessons(id1, id2, "related_to", config=fast_config)
 
-        related = core.get_related(id1, config=temp_config)
+        related = core.get_related(id1, config=fast_config)
 
         assert len(related) == 1
         assert related[0].id == id2
@@ -181,33 +182,33 @@ class TestGraph:
 class TestReferenceTables:
     """Test reference table operations."""
 
-    def test_list_sources(self, temp_config):
+    def test_list_sources(self, fast_config):
         """Test listing source types."""
-        sources = core.list_sources(config=temp_config)
+        sources = core.list_sources(config=fast_config)
 
         assert len(sources) == 5
         source_names = [s.name for s in sources]
         assert "tested" in source_names
         assert "inferred" in source_names
 
-    def test_list_confidence_levels(self, temp_config):
+    def test_list_confidence_levels(self, fast_config):
         """Test listing confidence levels."""
-        levels = core.list_confidence_levels(config=temp_config)
+        levels = core.list_confidence_levels(config=fast_config)
 
         assert len(levels) == 5
         assert levels[0].name == "very-low"
         assert levels[4].name == "very-high"
 
-    def test_list_tags(self, temp_config):
+    def test_list_tags(self, fast_config):
         """Test listing tags."""
         core.add_lesson(
             title="Tagged Lesson",
             content="Has tags.",
             tags=["alpha", "beta"],
-            config=temp_config,
+            config=fast_config,
         )
 
-        tags = core.list_tags(with_counts=True, config=temp_config)
+        tags = core.list_tags(with_counts=True, config=fast_config)
 
         assert len(tags) == 2
         tag_names = [t.name for t in tags]
@@ -221,7 +222,7 @@ class TestReferenceTables:
 class TestResources:
     """Test resource operations (v2)."""
 
-    def test_add_doc_resource(self, temp_config):
+    def test_add_doc_resource(self, fast_config):
         """Test adding a doc resource."""
         resource_id = core.add_resource(
             type="doc",
@@ -229,35 +230,35 @@ class TestResources:
             content="This is test documentation content.",
             versions=["v3"],
             tags=["test", "doc"],
-            config=temp_config,
+            config=fast_config,
         )
 
         assert resource_id is not None
         assert len(resource_id) > 0
 
-    def test_add_doc_without_version_defaults_to_unversioned(self, temp_config):
+    def test_add_doc_without_version_defaults_to_unversioned(self, fast_config):
         """Test that docs without versions default to 'unversioned'."""
         resource_id = core.add_resource(
             type="doc",
             title="Unversioned Doc",
             content="Content without version.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        resource = core.get_resource(resource_id, config=temp_config)
+        resource = core.get_resource(resource_id, config=fast_config)
         assert resource.versions == ["unversioned"]
 
-    def test_add_script_requires_path(self, temp_config):
+    def test_add_script_requires_path(self, fast_config):
         """Test that scripts require a path."""
         with pytest.raises(ValueError, match="Scripts require a path"):
             core.add_resource(
                 type="script",
                 title="Script without path",
                 content="echo hello",
-                config=temp_config,
+                config=fast_config,
             )
 
-    def test_add_script_with_path(self, temp_config):
+    def test_add_script_with_path(self, fast_config):
         """Test adding a script resource with path."""
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
@@ -271,10 +272,10 @@ class TestResources:
                 path=script_path,
                 versions=["v2", "v3"],
                 tags=["test", "script"],
-                config=temp_config,
+                config=fast_config,
             )
 
-            resource = core.get_resource(resource_id, config=temp_config)
+            resource = core.get_resource(resource_id, config=fast_config)
             assert resource is not None
             assert resource.type == "script"
             assert resource.title == "Test Script"
@@ -286,7 +287,7 @@ class TestResources:
             import os
             os.unlink(script_path)
 
-    def test_get_resource(self, temp_config):
+    def test_get_resource(self, fast_config):
         """Test getting a resource by ID."""
         resource_id = core.add_resource(
             type="doc",
@@ -294,10 +295,10 @@ class TestResources:
             content="Content for get test.",
             versions=["v3"],
             tags=["get", "test"],
-            config=temp_config,
+            config=fast_config,
         )
 
-        resource = core.get_resource(resource_id, config=temp_config)
+        resource = core.get_resource(resource_id, config=fast_config)
 
         assert resource is not None
         assert resource.id == resource_id
@@ -306,44 +307,44 @@ class TestResources:
         assert "v3" in resource.versions
         assert "get" in resource.tags
 
-    def test_get_nonexistent_resource(self, temp_config):
+    def test_get_nonexistent_resource(self, fast_config):
         """Test getting a resource that doesn't exist."""
-        resource = core.get_resource("nonexistent-id", config=temp_config)
+        resource = core.get_resource("nonexistent-id", config=fast_config)
         assert resource is None
 
-    def test_delete_resource(self, temp_config):
+    def test_delete_resource(self, fast_config):
         """Test deleting a resource."""
         resource_id = core.add_resource(
             type="doc",
             title="To Delete",
             content="This will be deleted.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        success = core.delete_resource(resource_id, config=temp_config)
+        success = core.delete_resource(resource_id, config=fast_config)
         assert success is True
 
-        resource = core.get_resource(resource_id, config=temp_config)
+        resource = core.get_resource(resource_id, config=fast_config)
         assert resource is None
 
-    def test_multi_version_resource(self, temp_config):
+    def test_multi_version_resource(self, fast_config):
         """Test resource with multiple versions."""
         resource_id = core.add_resource(
             type="doc",
             title="Multi-version Doc",
             content="Works with multiple API versions.",
             versions=["v2", "v3", "v4"],
-            config=temp_config,
+            config=fast_config,
         )
 
-        resource = core.get_resource(resource_id, config=temp_config)
+        resource = core.get_resource(resource_id, config=fast_config)
         assert set(resource.versions) == {"v2", "v3", "v4"}
 
 
 class TestRules:
     """Test rule operations (v2)."""
 
-    def test_suggest_rule(self, temp_config):
+    def test_suggest_rule(self, fast_config):
         """Test suggesting a rule."""
         rule_id = core.suggest_rule(
             title="Always GET before PUT",
@@ -351,37 +352,37 @@ class TestRules:
             rationale="PUT replaces entire resource; GET ensures you have current state.",
             tags=["api", "best-practice"],
             suggested_by="test-agent",
-            config=temp_config,
+            config=fast_config,
         )
 
         assert rule_id is not None
         assert len(rule_id) > 0
 
-    def test_suggest_rule_requires_rationale(self, temp_config):
+    def test_suggest_rule_requires_rationale(self, fast_config):
         """Test that rules require rationale."""
         with pytest.raises(ValueError, match="Rationale is required"):
             core.suggest_rule(
                 title="Rule without rationale",
                 content="Some content.",
                 rationale="",
-                config=temp_config,
+                config=fast_config,
             )
 
-    def test_rule_defaults_to_unapproved(self, temp_config):
+    def test_rule_defaults_to_unapproved(self, fast_config):
         """Test that new rules are unapproved by default."""
         rule_id = core.suggest_rule(
             title="Unapproved Rule",
             content="This should not be approved yet.",
             rationale="Testing default approval status.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
         assert rule.approved is False
         assert rule.approved_at is None
         assert rule.approved_by is None
 
-    def test_get_rule(self, temp_config):
+    def test_get_rule(self, fast_config):
         """Test getting a rule by ID."""
         rule_id = core.suggest_rule(
             title="Test Rule",
@@ -389,10 +390,10 @@ class TestRules:
             rationale="Test rationale.",
             tags=["test", "rule"],
             suggested_by="tester",
-            config=temp_config,
+            config=fast_config,
         )
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
 
         assert rule is not None
         assert rule.id == rule_id
@@ -402,70 +403,70 @@ class TestRules:
         assert "test" in rule.tags
         assert rule.suggested_by == "tester"
 
-    def test_get_nonexistent_rule(self, temp_config):
+    def test_get_nonexistent_rule(self, fast_config):
         """Test getting a rule that doesn't exist."""
-        rule = core.get_rule("nonexistent-id", config=temp_config)
+        rule = core.get_rule("nonexistent-id", config=fast_config)
         assert rule is None
 
-    def test_approve_rule(self, temp_config):
+    def test_approve_rule(self, fast_config):
         """Test approving a rule."""
         rule_id = core.suggest_rule(
             title="Rule to Approve",
             content="Will be approved.",
             rationale="For testing approval.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        success = core.approve_rule(rule_id, approved_by="admin", config=temp_config)
+        success = core.approve_rule(rule_id, approved_by="admin", config=fast_config)
         assert success is True
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
         assert rule.approved is True
         assert rule.approved_by == "admin"
         assert rule.approved_at is not None
 
-    def test_reject_rule(self, temp_config):
+    def test_reject_rule(self, fast_config):
         """Test rejecting (deleting) a rule."""
         rule_id = core.suggest_rule(
             title="Rule to Reject",
             content="Will be rejected.",
             rationale="For testing rejection.",
-            config=temp_config,
+            config=fast_config,
         )
 
-        success = core.reject_rule(rule_id, config=temp_config)
+        success = core.reject_rule(rule_id, config=fast_config)
         assert success is True
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
         assert rule is None
 
-    def test_list_pending_rules(self, temp_config):
+    def test_list_pending_rules(self, fast_config):
         """Test listing pending (unapproved) rules."""
         # Create some rules
         rule1_id = core.suggest_rule(
             title="Pending Rule 1",
             content="Content 1.",
             rationale="Rationale 1.",
-            config=temp_config,
+            config=fast_config,
         )
         rule2_id = core.suggest_rule(
             title="Pending Rule 2",
             content="Content 2.",
             rationale="Rationale 2.",
-            config=temp_config,
+            config=fast_config,
         )
         rule3_id = core.suggest_rule(
             title="Approved Rule",
             content="Content 3.",
             rationale="Rationale 3.",
-            config=temp_config,
+            config=fast_config,
         )
 
         # Approve one rule
-        core.approve_rule(rule3_id, config=temp_config)
+        core.approve_rule(rule3_id, config=fast_config)
 
         # List pending rules
-        pending = core.list_pending_rules(config=temp_config)
+        pending = core.list_pending_rules(config=fast_config)
 
         assert len(pending) == 2
         pending_ids = [r.id for r in pending]
@@ -473,12 +474,12 @@ class TestRules:
         assert rule2_id in pending_ids
         assert rule3_id not in pending_ids
 
-    def test_rule_with_linked_lesson(self, temp_config):
+    def test_rule_with_linked_lesson(self, fast_config):
         """Test creating a rule linked to a lesson."""
         lesson_id = core.add_lesson(
             title="Related Lesson",
             content="This lesson relates to the rule.",
-            config=temp_config,
+            config=fast_config,
         )
 
         rule_id = core.suggest_rule(
@@ -486,19 +487,19 @@ class TestRules:
             content="Rule content.",
             rationale="Based on the related lesson.",
             linked_lessons=[lesson_id],
-            config=temp_config,
+            config=fast_config,
         )
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
         assert lesson_id in rule.linked_lessons
 
-    def test_rule_with_linked_resource(self, temp_config):
+    def test_rule_with_linked_resource(self, fast_config):
         """Test creating a rule linked to a resource."""
         resource_id = core.add_resource(
             type="doc",
             title="Related Doc",
             content="Related documentation.",
-            config=temp_config,
+            config=fast_config,
         )
 
         rule_id = core.suggest_rule(
@@ -506,33 +507,33 @@ class TestRules:
             content="Rule content.",
             rationale="Based on the related resource.",
             linked_resources=[resource_id],
-            config=temp_config,
+            config=fast_config,
         )
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
         assert resource_id in rule.linked_resources
 
-    def test_link_to_rule(self, temp_config):
+    def test_link_to_rule(self, fast_config):
         """Test adding a link to an existing rule."""
         rule_id = core.suggest_rule(
             title="Rule to Link To",
             content="Rule content.",
             rationale="Will have links added.",
-            config=temp_config,
+            config=fast_config,
         )
 
         lesson_id = core.add_lesson(
             title="Lesson to Link",
             content="Will be linked to the rule.",
-            config=temp_config,
+            config=fast_config,
         )
 
         success = core.link_to_rule(
-            rule_id, lesson_id, "lesson", config=temp_config
+            rule_id, lesson_id, "lesson", config=fast_config
         )
         assert success is True
 
-        rule = core.get_rule(rule_id, config=temp_config)
+        rule = core.get_rule(rule_id, config=fast_config)
         assert lesson_id in rule.linked_lessons
 
 
@@ -585,7 +586,7 @@ class TestVersionMatching:
 class TestUnifiedSearch:
     """Test unified search across lessons, resources, and rules (v2)."""
 
-    def test_search_resources(self, temp_config):
+    def test_search_resources(self, fast_config):
         """Test searching resources."""
         from ai_lessons.search import search_resources
 
@@ -596,19 +597,19 @@ class TestUnifiedSearch:
             content="Documentation about Jira workflow transitions and statuses.",
             versions=["v3"],
             tags=["jira", "api"],
-            config=temp_config,
+            config=fast_config,
         )
 
         results = search_resources(
             "workflow transitions",
-            config=temp_config,
+            config=fast_config,
         )
 
         assert len(results) > 0
         # Can return "resource" or "chunk" result type depending on scoring
         assert results[0].result_type in ("resource", "chunk")
 
-    def test_search_resources_with_version_filter(self, temp_config):
+    def test_search_resources_with_version_filter(self, fast_config):
         """Test searching resources with version filter."""
         from ai_lessons.search import search_resources
 
@@ -618,28 +619,28 @@ class TestUnifiedSearch:
             title="V2 Only Doc",
             content="This doc is for version 2 only.",
             versions=["v2"],
-            config=temp_config,
+            config=fast_config,
         )
         core.add_resource(
             type="doc",
             title="V3 Only Doc",
             content="This doc is for version 3 only.",
             versions=["v3"],
-            config=temp_config,
+            config=fast_config,
         )
 
         # Search for v3 only
         results = search_resources(
             "doc version",
             versions=["v3"],
-            config=temp_config,
+            config=fast_config,
         )
 
         # V2 doc should be excluded (disjoint)
         result_titles = [r.title for r in results]
         assert "V2 Only Doc" not in result_titles
 
-    def test_rules_require_tag_overlap(self, temp_config):
+    def test_rules_require_tag_overlap(self, fast_config):
         """Test that rules only surface with tag overlap."""
         from ai_lessons.search import search_rules
 
@@ -649,14 +650,14 @@ class TestUnifiedSearch:
             content="Always GET before PUT on Jira.",
             rationale="PUT replaces entire resource.",
             tags=["jira"],
-            config=temp_config,
+            config=fast_config,
         )
-        core.approve_rule(rule_id, config=temp_config)
+        core.approve_rule(rule_id, config=fast_config)
 
         # Search without any tags - rule should NOT surface
         results_no_tags = search_rules(
             "jira",
-            config=temp_config,
+            config=fast_config,
         )
         assert len(results_no_tags) == 0
 
@@ -664,11 +665,11 @@ class TestUnifiedSearch:
         results_with_tag = search_rules(
             "jira",
             tag_filter=["jira"],
-            config=temp_config,
+            config=fast_config,
         )
         assert len(results_with_tag) > 0
 
-    def test_unapproved_rules_not_in_search(self, temp_config):
+    def test_unapproved_rules_not_in_search(self, fast_config):
         """Test that unapproved rules don't appear in search."""
         from ai_lessons.search import search_rules
 
@@ -678,13 +679,13 @@ class TestUnifiedSearch:
             content="This should not appear.",
             rationale="Testing unapproved rules.",
             tags=["test"],
-            config=temp_config,
+            config=fast_config,
         )
 
         results = search_rules(
             "unapproved",
             tag_filter=["test"],
-            config=temp_config,
+            config=fast_config,
         )
 
         assert len(results) == 0
@@ -693,7 +694,7 @@ class TestUnifiedSearch:
 class TestChunkStorage:
     """Test chunk storage integration (v3)."""
 
-    def test_doc_creates_chunks(self, temp_config):
+    def test_doc_creates_chunks(self, fast_config):
         """Test that adding a doc resource creates chunks."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.db import get_db
@@ -718,11 +719,11 @@ Content for section three.
             title="Chunked Doc",
             content=content,
             chunking_config=ChunkingConfig(min_chunk_size=1),
-            config=temp_config,
+            config=fast_config,
         )
 
         # Verify chunks were created
-        with get_db(temp_config) as conn:
+        with get_db(fast_config) as conn:
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?",
                 (resource_id,),
@@ -731,7 +732,7 @@ Content for section three.
 
         assert chunk_count >= 3  # At least 3 sections
 
-    def test_chunks_have_metadata(self, temp_config):
+    def test_chunks_have_metadata(self, fast_config):
         """Test that chunks have breadcrumb and line info."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.db import get_db
@@ -752,10 +753,10 @@ More content here.
             title="Doc with Metadata",
             content=content,
             chunking_config=ChunkingConfig(min_chunk_size=1),
-            config=temp_config,
+            config=fast_config,
         )
 
-        with get_db(temp_config) as conn:
+        with get_db(fast_config) as conn:
             cursor = conn.execute(
                 """
                 SELECT chunk_index, title, breadcrumb, start_line, end_line, token_count
@@ -786,7 +787,7 @@ More content here.
             assert chunk["token_count"] is not None
             assert chunk["token_count"] > 0
 
-    def test_chunks_have_embeddings(self, temp_config):
+    def test_chunks_have_embeddings(self, fast_config):
         """Test that chunks have embeddings stored."""
         from ai_lessons.db import get_db
 
@@ -804,10 +805,10 @@ Creates a new user.
             type="doc",
             title="API Doc",
             content=content,
-            config=temp_config,
+            config=fast_config,
         )
 
-        with get_db(temp_config) as conn:
+        with get_db(fast_config) as conn:
             # Get chunk IDs
             cursor = conn.execute(
                 "SELECT id FROM resource_chunks WHERE resource_id = ?",
@@ -823,7 +824,7 @@ Creates a new user.
                 )
                 assert cursor.fetchone() is not None
 
-    def test_custom_chunking_config(self, temp_config):
+    def test_custom_chunking_config(self, fast_config):
         """Test that custom chunking config is respected."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.db import get_db
@@ -856,10 +857,10 @@ Content B.
             title="Custom Chunked Doc",
             content=content,
             chunking_config=chunking_config,
-            config=temp_config,
+            config=fast_config,
         )
 
-        with get_db(temp_config) as conn:
+        with get_db(fast_config) as conn:
             cursor = conn.execute(
                 "SELECT title FROM resource_chunks WHERE resource_id = ? ORDER BY chunk_index",
                 (resource_id,),
@@ -871,7 +872,7 @@ Content B.
         assert "Subsection A.1" in titles
         assert "Subsection A.2" in titles
 
-    def test_delete_resource_deletes_chunks(self, temp_config):
+    def test_delete_resource_deletes_chunks(self, fast_config):
         """Test that deleting a resource deletes its chunks."""
         from ai_lessons.db import get_db
 
@@ -885,11 +886,11 @@ Content.
             type="doc",
             title="Doc to Delete",
             content=content,
-            config=temp_config,
+            config=fast_config,
         )
 
         # Verify chunks exist
-        with get_db(temp_config) as conn:
+        with get_db(fast_config) as conn:
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?",
                 (resource_id,),
@@ -897,17 +898,17 @@ Content.
             assert cursor.fetchone()[0] > 0
 
         # Delete resource
-        core.delete_resource(resource_id, config=temp_config)
+        core.delete_resource(resource_id, config=fast_config)
 
         # Verify chunks are deleted (via CASCADE)
-        with get_db(temp_config) as conn:
+        with get_db(fast_config) as conn:
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?",
                 (resource_id,),
             )
             assert cursor.fetchone()[0] == 0
 
-    def test_script_gets_chunks(self, temp_config):
+    def test_script_gets_chunks(self, fast_config):
         """Test that scripts get chunked like docs (at least 1 chunk)."""
         import tempfile
         from ai_lessons.db import get_db
@@ -921,10 +922,10 @@ Content.
                 type="script",
                 title="Script Gets Chunks",
                 path=script_path,
-                config=temp_config,
+                config=fast_config,
             )
 
-            with get_db(temp_config) as conn:
+            with get_db(fast_config) as conn:
                 cursor = conn.execute(
                     "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?",
                     (resource_id,),
@@ -939,6 +940,7 @@ Content.
 class TestChunkSearch:
     """Tests for searching chunk embeddings."""
 
+    @pytest.mark.slow
     def test_search_finds_chunk_content(self, temp_config):
         """Test that search finds content within specific chunks."""
         from ai_lessons.chunking import ChunkingConfig
@@ -968,6 +970,7 @@ Process payments and handle refunds securely.
         )
 
         # Search for content that's specifically in the Orders chunk
+        # Note: This test requires real embeddings for semantic search
         results = search_resources(
             "customer orders fulfillment tracking",
             config=temp_config,
@@ -978,7 +981,7 @@ Process payments and handle refunds securely.
         found = results[0]
         assert "order" in found.content.lower() or "order" in found.title.lower()
 
-    def test_chunk_results_include_breadcrumb(self, temp_config):
+    def test_chunk_results_include_breadcrumb(self, fast_config):
         """Test that chunk results include breadcrumb context."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.search import search_resources
@@ -1004,13 +1007,13 @@ Run pip install to setup.
                 header_split_levels=[2, 3],
                 min_chunk_size=1,
             ),
-            config=temp_config,
+            config=fast_config,
         )
 
         # Search for prerequisites content
         results = search_resources(
             "Python 3.10 required",
-            config=temp_config,
+            config=fast_config,
         )
 
         assert len(results) > 0
@@ -1021,7 +1024,7 @@ Run pip install to setup.
             # Title should include hierarchy
             assert ">" in result.title or "Main Guide" in result.title or "Prerequisites" in result.title
 
-    def test_deduplication_keeps_best_chunk(self, temp_config):
+    def test_deduplication_keeps_best_chunk(self, fast_config):
         """Test that multiple chunks from same resource return only best one."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.search import search_resources
@@ -1045,26 +1048,27 @@ Gamma content about widgets.
             title="Widget Docs XYZ123",
             content=content,
             chunking_config=ChunkingConfig(min_chunk_size=1),
-            config=temp_config,
+            config=fast_config,
         )
 
         # Search for something all chunks might match
         results = search_resources(
             "widgets content XYZ123",
-            config=temp_config,
+            config=fast_config,
         )
 
         # Should only get one result per resource (deduplicated)
         result_resource_ids = []
         for r in results:
-            rid = r.resource_id if r.resource_id else r.id
+            # ChunkResult has resource_id, ResourceResult uses id
+            rid = getattr(r, 'resource_id', None) or r.id
             result_resource_ids.append(rid)
 
         # The resource_id should appear at most once
-        matching_results = [r for r in results if resource_id in (r.resource_id, r.id)]
+        matching_results = [r for r in results if resource_id in (getattr(r, 'resource_id', None), r.id)]
         assert len(matching_results) <= 1
 
-    def test_search_without_chunks(self, temp_config):
+    def test_search_without_chunks(self, fast_config):
         """Test that include_chunks=False returns only resource-level results."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.search import search_resources
@@ -1080,21 +1084,21 @@ Content for section one about unique topic ABC789.
             title="Test Resource ABC789",
             content=content,
             chunking_config=ChunkingConfig(min_chunk_size=1),
-            config=temp_config,
+            config=fast_config,
         )
 
         # Search with chunks disabled
         results = search_resources(
             "unique topic ABC789",
             include_chunks=False,
-            config=temp_config,
+            config=fast_config,
         )
 
         # All results should be resource type, not chunk
         for result in results:
             assert result.result_type == "resource"
 
-    def test_chunk_version_filtering(self, temp_config):
+    def test_chunk_version_filtering(self, fast_config):
         """Test that chunk search respects version filtering."""
         from ai_lessons.chunking import ChunkingConfig
         from ai_lessons.search import search_resources
@@ -1111,14 +1115,14 @@ This feature specific to version 3 only.
             content=content,
             versions=["v3"],
             chunking_config=ChunkingConfig(min_chunk_size=1),
-            config=temp_config,
+            config=fast_config,
         )
 
         # Search with v2 filter - should not find v3 doc
         results = search_resources(
             "feature specific version 3",
             versions=["v2"],
-            config=temp_config,
+            config=fast_config,
         )
 
         # V3 doc should be excluded due to disjoint versions

@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
-from ai_lessons.config import Config, EmbeddingConfig, SearchConfig
-from ai_lessons.db import init_db
 from ai_lessons import core
 from ai_lessons.search import (
     # Constants
