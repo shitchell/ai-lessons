@@ -2,31 +2,13 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
-from ai_lessons.config import Config, EmbeddingConfig, SearchConfig
-from ai_lessons.db import init_db, get_db
+from ai_lessons.db import get_db
 from ai_lessons import core
 
 
-@pytest.fixture
-def temp_config():
-    """Create a temporary configuration for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        config = Config(
-            db_path=db_path,
-            embedding=EmbeddingConfig(
-                backend="sentence-transformers",
-                model="all-MiniLM-L6-v2",
-            ),
-            search=SearchConfig(),
-        )
-        init_db(config)
-        yield config
+# temp_config fixture is provided by conftest.py
 
 
 class TestLessonToLessonEdges:
