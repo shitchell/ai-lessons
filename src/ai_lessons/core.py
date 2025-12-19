@@ -231,6 +231,7 @@ class SourceType:
     name: str
     description: Optional[str] = None
     typical_confidence: Optional[str] = None
+    count: int = 0  # Optional usage count
 
 
 @dataclass
@@ -238,11 +239,32 @@ class ConfidenceLevel:
     """A confidence level with its ordinal."""
     name: str
     ordinal: int
+    count: int = 0  # Optional usage count
 
 
 @dataclass
 class Tag:
     """A tag with optional count."""
+    name: str
+    count: int = 0
+
+
+@dataclass
+class TagInfo:
+    """Tag with detailed usage counts per entity type."""
+    name: str
+    lesson_count: int = 0
+    resource_count: int = 0
+    rule_count: int = 0
+
+    @property
+    def total_count(self) -> int:
+        return self.lesson_count + self.resource_count + self.rule_count
+
+
+@dataclass
+class RelationType:
+    """An edge relation type with usage count."""
     name: str
     count: int = 0
 
@@ -1560,10 +1582,13 @@ def list_tags(with_counts: bool = False, config: Optional[Config] = None) -> lis
             return [Tag(name=row["tag"]) for row in cursor.fetchall()]
 
 
-def list_sources(config: Optional[Config] = None) -> list[SourceType]:
+def list_sources(
+    with_counts: bool = False, config: Optional[Config] = None
+) -> list[SourceType]:
     """List all source types.
 
     Args:
+        with_counts: Include lesson usage counts.
         config: Configuration to use.
 
     Returns:
@@ -1575,23 +1600,47 @@ def list_sources(config: Optional[Config] = None) -> list[SourceType]:
     ensure_initialized(config)
 
     with get_db(config) as conn:
-        cursor = conn.execute(
-            "SELECT name, description, typical_confidence FROM source_types ORDER BY name"
-        )
-        return [
-            SourceType(
-                name=row["name"],
-                description=row["description"],
-                typical_confidence=row["typical_confidence"],
+        if with_counts:
+            cursor = conn.execute(
+                """
+                SELECT st.name, st.description, st.typical_confidence,
+                       COUNT(l.id) as count
+                FROM source_types st
+                LEFT JOIN lessons l ON l.source = st.name
+                GROUP BY st.name, st.description, st.typical_confidence
+                ORDER BY st.name
+                """
             )
-            for row in cursor.fetchall()
-        ]
+            return [
+                SourceType(
+                    name=row["name"],
+                    description=row["description"],
+                    typical_confidence=row["typical_confidence"],
+                    count=row["count"],
+                )
+                for row in cursor.fetchall()
+            ]
+        else:
+            cursor = conn.execute(
+                "SELECT name, description, typical_confidence FROM source_types ORDER BY name"
+            )
+            return [
+                SourceType(
+                    name=row["name"],
+                    description=row["description"],
+                    typical_confidence=row["typical_confidence"],
+                )
+                for row in cursor.fetchall()
+            ]
 
 
-def list_confidence_levels(config: Optional[Config] = None) -> list[ConfidenceLevel]:
+def list_confidence_levels(
+    with_counts: bool = False, config: Optional[Config] = None
+) -> list[ConfidenceLevel]:
     """List all confidence levels.
 
     Args:
+        with_counts: Include lesson usage counts.
         config: Configuration to use.
 
     Returns:
@@ -1603,13 +1652,251 @@ def list_confidence_levels(config: Optional[Config] = None) -> list[ConfidenceLe
     ensure_initialized(config)
 
     with get_db(config) as conn:
+        if with_counts:
+            cursor = conn.execute(
+                """
+                SELECT cl.name, cl.ordinal, COUNT(l.id) as count
+                FROM confidence_levels cl
+                LEFT JOIN lessons l ON l.confidence = cl.name
+                GROUP BY cl.name, cl.ordinal
+                ORDER BY cl.ordinal
+                """
+            )
+            return [
+                ConfidenceLevel(
+                    name=row["name"], ordinal=row["ordinal"], count=row["count"]
+                )
+                for row in cursor.fetchall()
+            ]
+        else:
+            cursor = conn.execute(
+                "SELECT name, ordinal FROM confidence_levels ORDER BY ordinal"
+            )
+            return [
+                ConfidenceLevel(name=row["name"], ordinal=row["ordinal"])
+                for row in cursor.fetchall()
+            ]
+
+
+def list_tags_detailed(
+    entity_type: Optional[str] = None,
+    pattern: Optional[str] = None,
+    config: Optional[Config] = None,
+) -> list[TagInfo]:
+    """List all tags with per-entity-type counts.
+
+    Args:
+        entity_type: Filter by entity type (lesson, resource, rule).
+        pattern: Filter tags by substring (case-insensitive).
+        config: Configuration to use.
+
+    Returns:
+        List of TagInfo with counts per entity type.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        # Build query to get tags from all entity types with counts
+        query = """
+            SELECT
+                tag,
+                SUM(CASE WHEN source = 'lesson' THEN 1 ELSE 0 END) as lesson_count,
+                SUM(CASE WHEN source = 'resource' THEN 1 ELSE 0 END) as resource_count,
+                SUM(CASE WHEN source = 'rule' THEN 1 ELSE 0 END) as rule_count
+            FROM (
+                SELECT tag, 'lesson' as source FROM lesson_tags
+                UNION ALL
+                SELECT tag, 'resource' as source FROM resource_tags
+                UNION ALL
+                SELECT tag, 'rule' as source FROM rule_tags
+            ) combined
+        """
+
+        conditions = []
+        params: list = []
+
+        if pattern:
+            conditions.append("tag LIKE ?")
+            params.append(f"%{pattern}%")
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " GROUP BY tag ORDER BY tag"
+
+        cursor = conn.execute(query, params)
+        results = []
+        for row in cursor.fetchall():
+            tag_info = TagInfo(
+                name=row["tag"],
+                lesson_count=row["lesson_count"],
+                resource_count=row["resource_count"],
+                rule_count=row["rule_count"],
+            )
+            # Filter by entity type if specified
+            if entity_type:
+                if entity_type == "lesson" and tag_info.lesson_count == 0:
+                    continue
+                elif entity_type == "resource" and tag_info.resource_count == 0:
+                    continue
+                elif entity_type == "rule" and tag_info.rule_count == 0:
+                    continue
+            results.append(tag_info)
+
+        return results
+
+
+def list_tag_aliases(config: Optional[Config] = None) -> list[tuple[str, str]]:
+    """List tag aliases from tag_relations table.
+
+    Args:
+        config: Configuration to use.
+
+    Returns:
+        List of (alias, canonical_tag) tuples.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
         cursor = conn.execute(
-            "SELECT name, ordinal FROM confidence_levels ORDER BY ordinal"
+            """
+            SELECT from_tag, to_tag
+            FROM tag_relations
+            WHERE relation = 'alias'
+            ORDER BY from_tag
+            """
         )
+        return [(row["from_tag"], row["to_tag"]) for row in cursor.fetchall()]
+
+
+def list_relations(
+    entity_type: Optional[str] = None,
+    config: Optional[Config] = None,
+) -> list[RelationType]:
+    """List distinct edge relation types with counts.
+
+    Args:
+        entity_type: Filter by from/to entity type (lesson, resource, rule).
+        config: Configuration to use.
+
+    Returns:
+        List of RelationType with usage counts.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    with get_db(config) as conn:
+        if entity_type:
+            cursor = conn.execute(
+                """
+                SELECT relation, COUNT(*) as count
+                FROM edges
+                WHERE from_type = ? OR to_type = ?
+                GROUP BY relation
+                ORDER BY count DESC, relation
+                """,
+                (entity_type, entity_type),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT relation, COUNT(*) as count
+                FROM edges
+                GROUP BY relation
+                ORDER BY count DESC, relation
+                """
+            )
         return [
-            ConfidenceLevel(name=row["name"], ordinal=row["ordinal"])
+            RelationType(name=row["relation"], count=row["count"])
             for row in cursor.fetchall()
         ]
+
+
+def get_database_stats(config: Optional[Config] = None) -> dict:
+    """Get comprehensive database statistics.
+
+    Args:
+        config: Configuration to use.
+
+    Returns:
+        Dictionary with statistics for all entity types.
+    """
+    if config is None:
+        config = get_config()
+
+    ensure_initialized(config)
+
+    stats: dict = {}
+
+    with get_db(config) as conn:
+        # Lesson stats
+        cursor = conn.execute("SELECT COUNT(*) as count FROM lessons")
+        stats["lessons"] = {"count": cursor.fetchone()["count"]}
+
+        # Resource stats
+        cursor = conn.execute("SELECT COUNT(*) as count FROM resources")
+        resource_count = cursor.fetchone()["count"]
+        cursor = conn.execute("SELECT COUNT(*) as count FROM resource_chunks")
+        chunk_count = cursor.fetchone()["count"]
+        stats["resources"] = {"count": resource_count, "chunks": chunk_count}
+
+        # Rule stats
+        cursor = conn.execute("SELECT COUNT(*) as count FROM rules")
+        stats["rules"] = {"count": cursor.fetchone()["count"]}
+
+        # Edge stats
+        cursor = conn.execute("SELECT COUNT(*) as count FROM edges")
+        stats["edges"] = {"count": cursor.fetchone()["count"]}
+
+        # Tag stats
+        cursor = conn.execute(
+            """
+            SELECT COUNT(DISTINCT tag) as count FROM (
+                SELECT tag FROM lesson_tags
+                UNION
+                SELECT tag FROM resource_tags
+                UNION
+                SELECT tag FROM rule_tags
+            )
+            """
+        )
+        stats["tags"] = {"count": cursor.fetchone()["count"]}
+
+        # Confidence distribution
+        cursor = conn.execute(
+            """
+            SELECT confidence, COUNT(*) as count
+            FROM lessons
+            GROUP BY confidence
+            ORDER BY confidence
+            """
+        )
+        stats["confidence_distribution"] = {
+            row["confidence"]: row["count"] for row in cursor.fetchall()
+        }
+
+        # Source distribution
+        cursor = conn.execute(
+            """
+            SELECT source, COUNT(*) as count
+            FROM lessons
+            GROUP BY source
+            ORDER BY source
+            """
+        )
+        stats["source_distribution"] = {
+            row["source"]: row["count"] for row in cursor.fetchall()
+        }
+
+    return stats
 
 
 def add_source(

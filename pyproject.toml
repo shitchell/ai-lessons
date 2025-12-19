@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-lessons"
-version = "0.9.0"
+version = "0.9.1"
 description = "AI-powered lessons learned system with semantic search and graph relationships"
 readme = "README.md"
 license = {text = "MIT"}

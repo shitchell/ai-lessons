@@ -6,6 +6,7 @@ import click
 
 from .admin import admin
 from .contribute import contribute
+from .info import info
 from .recall import recall
 
 
@@ -14,11 +15,12 @@ from .recall import recall
 def main():
     """AI Lessons - Knowledge management with semantic search.
 
-    Commands are organized into three groups:
+    Commands are organized into four groups:
 
     \b
       admin       Database and system management
       contribute  Add and modify lessons, resources, and rules
+      info        Schema discovery and statistics
       recall      Search and view lessons
     """
     pass
@@ -27,6 +29,7 @@ def main():
 # Register command groups
 main.add_command(admin)
 main.add_command(contribute)
+main.add_command(info)
 main.add_command(recall)
 
 

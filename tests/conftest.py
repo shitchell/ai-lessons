@@ -32,32 +32,36 @@ class MockEmbedder:
 
     This dramatically speeds up tests by avoiding SentenceTransformers model loading.
     Vectors are deterministic based on input text hash for reproducibility.
+    Implements the EmbeddingBackend interface (embed, embed_batch, dimensions).
     """
 
-    dimensions: int = 384
-
     def __init__(self, dimensions: int = 384) -> None:
-        self.dimensions = dimensions
+        self._dimensions = dimensions
         self._call_count = 0
 
-    def embed_text(self, text: str) -> list[float]:
+    @property
+    def dimensions(self) -> int:
+        """Return the embedding dimensions."""
+        return self._dimensions
+
+    def embed(self, text: str) -> list[float]:
         """Generate a deterministic mock embedding based on text hash."""
         self._call_count += 1
         # Use hash to get deterministic but varied vectors
         h = hash(text) & 0xFFFFFFFF
         # Generate vector with some variation based on hash
         return [
-            ((h >> (i % 32)) & 1) * 0.1 + (i / self.dimensions) * 0.01
-            for i in range(self.dimensions)
+            ((h >> (i % 32)) & 1) * 0.1 + (i / self._dimensions) * 0.01
+            for i in range(self._dimensions)
         ]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts."""
-        return [self.embed_text(t) for t in texts]
+        return [self.embed(t) for t in texts]
 
     @property
     def call_count(self) -> int:
-        """Number of times embed_text was called."""
+        """Number of times embed was called."""
         return self._call_count
 
 
@@ -80,8 +84,8 @@ def patched_embedder() -> Generator[MockEmbedder, None, None]:
     """
     mock = MockEmbedder()
 
-    with patch("ai_lessons.embeddings._global_embedder", mock), \
-         patch("ai_lessons.embeddings._embedder_initialized", True):
+    with patch("ai_lessons.embeddings.get_embedder", return_value=mock), \
+         patch("ai_lessons.embeddings._embedder", mock):
         yield mock
 
 

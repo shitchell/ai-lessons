@@ -403,45 +403,6 @@ def related(id: str, depth: int, relation: tuple, bidirectional: bool):
         sys.exit(1)
 
 
-@recall.command("tags")
-@click.option("--counts", is_flag=True, help="Show usage counts")
-def list_tags(counts: bool):
-    """List all tags."""
-    tags = core.list_tags(with_counts=counts)
-
-    if not tags:
-        click.echo("No tags found.")
-        return
-
-    for tag in tags:
-        if counts:
-            click.echo(f"{tag.name} ({tag.count})")
-        else:
-            click.echo(tag.name)
-
-
-@recall.command("sources")
-def list_sources():
-    """List all source types."""
-    sources = core.list_sources()
-
-    for source in sources:
-        click.echo(f"{source.name}")
-        if source.description:
-            click.echo(f"  {source.description}")
-        if source.typical_confidence:
-            click.echo(f"  typical confidence: {source.typical_confidence}")
-
-
-@recall.command("confidence")
-def list_confidence():
-    """List all confidence levels."""
-    levels = core.list_confidence_levels()
-
-    for level in levels:
-        click.echo(f"{level.ordinal}. {level.name}")
-
-
 @recall.command("list")
 @click.option("--type", "entity_type", required=True,
               type=click.Choice(["lesson", "resource", "chunk", "rule"]),
