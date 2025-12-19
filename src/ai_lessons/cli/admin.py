@@ -10,7 +10,7 @@ import click
 from .. import core
 from ..config import get_config, DEFAULT_LESSONS_DIR
 from ..db import init_db, get_db
-from .display import format_rule
+from .display import ID_DISPLAY_LENGTH, format_rule
 from .utils import parse_tags
 
 
@@ -250,7 +250,7 @@ def generate_summaries(
         click.echo("Dry run - would generate summaries for:")
         for chunk in chunks[:10]:  # Show first 10
             title = chunk["title"] or f"(chunk)"
-            click.echo(f"  {chunk['id'][:15]}... {title}")
+            click.echo(f"  {chunk['id'][:ID_DISPLAY_LENGTH]} {title}")
         if len(chunks) > 10:
             click.echo(f"  ... and {len(chunks) - 10} more")
         return
@@ -379,7 +379,7 @@ def clear_resources(
 
     click.echo(f"{'Would delete' if dry_run else 'Will delete'} {len(resources)} resource(s):")
     for resource in resources[:10]:
-        click.echo(f"  [{resource.id[:15]}...] {resource.title}")
+        click.echo(f"  [{resource.id[:ID_DISPLAY_LENGTH]}] {resource.title}")
     if len(resources) > 10:
         click.echo(f"  ... and {len(resources) - 10} more")
 

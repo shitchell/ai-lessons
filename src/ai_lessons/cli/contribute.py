@@ -10,7 +10,7 @@ import click
 
 from .. import core
 from ..config import get_config
-from .display import display_chunking_preview
+from .display import ID_DISPLAY_LENGTH, display_chunking_preview
 from .utils import determine_root_dir, generate_title, parse_tags, warn_deprecation
 
 
@@ -307,7 +307,7 @@ def link_cmd(from_id: str, to_id: str, relation: str):
     success = core.link_entities(from_id, to_id, relation)
 
     if success:
-        click.echo(f"Linked {from_id[:15]}... --[{relation}]--> {to_id[:15]}...")
+        click.echo(f"Linked {from_id[:ID_DISPLAY_LENGTH]} --[{relation}]--> {to_id[:ID_DISPLAY_LENGTH]}")
     else:
         click.echo("Link already exists or invalid IDs.", err=True)
         sys.exit(1)
@@ -454,7 +454,7 @@ def add_resource(
             total_chunks += len(result.chunks)
             all_warnings.extend(result.warnings)
 
-        click.echo(f"Added: {resource_id[:15]}... {title}")
+        click.echo(f"Added: {resource_id[:ID_DISPLAY_LENGTH]} {title}")
 
     # Summary
     click.echo()
@@ -479,7 +479,7 @@ def add_resource(
                         summaries = generate_chunk_summaries(resource_id=resource_id, config=config)
                         total_summaries += len(summaries)
                     except Exception as e:
-                        click.echo(f"  Warning: Failed for {resource_id[:15]}...: {e}", err=True)
+                        click.echo(f"  Warning: Failed for {resource_id[:ID_DISPLAY_LENGTH]}: {e}", err=True)
                 click.echo(f"  Generated {total_summaries} summaries.")
         else:
             config = get_config()

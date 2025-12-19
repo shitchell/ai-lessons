@@ -14,6 +14,7 @@ from ..db import get_db
 from ..search import search_resources, search_resources_grouped, search_rules
 from ..chunk_ids import is_chunk_id
 from .display import (
+    ID_DISPLAY_LENGTH,
     format_chunk,
     format_grouped_search_results,
     format_lesson,
@@ -244,9 +245,9 @@ def show(id: str, verbose: bool, type_hint: Optional[str]):
                 if link.resolved_resource_id:
                     resource = core.get_resource(link.resolved_resource_id)
                     if resource:
-                        target = f"[{link.resolved_resource_id[:15]}...] {resource.title}"
+                        target = f"[{link.resolved_resource_id[:ID_DISPLAY_LENGTH]}] {resource.title}"
                     else:
-                        target = f"[{link.resolved_resource_id[:15]}...] (deleted)"
+                        target = f"[{link.resolved_resource_id[:ID_DISPLAY_LENGTH]}] (deleted)"
                 else:
                     target = "(not imported)"
                 fragment = f"#{link.to_fragment}" if link.to_fragment else ""
@@ -342,9 +343,9 @@ def related(id: str, depth: int, relation: tuple, bidirectional: bool):
                 if link.resolved_resource_id:
                     target = core.get_resource(link.resolved_resource_id)
                     if target:
-                        click.echo(f"  -> [{link.resolved_resource_id[:15]}...] {target.title}")
+                        click.echo(f"  -> [{link.resolved_resource_id[:ID_DISPLAY_LENGTH]}] {target.title}")
                     else:
-                        click.echo(f"  -> [{link.resolved_resource_id[:15]}...] (deleted)")
+                        click.echo(f"  -> [{link.resolved_resource_id[:ID_DISPLAY_LENGTH]}] (deleted)")
                 else:
                     click.echo(f"  -> {link.to_path} (not imported)")
             click.echo()
@@ -355,9 +356,9 @@ def related(id: str, depth: int, relation: tuple, bidirectional: bool):
             for link in incoming:
                 source = core.get_resource(link.from_resource_id)
                 if source:
-                    click.echo(f"  <- [{link.from_resource_id[:15]}...] {source.title}")
+                    click.echo(f"  <- [{link.from_resource_id[:ID_DISPLAY_LENGTH]}] {source.title}")
                 else:
-                    click.echo(f"  <- [{link.from_resource_id[:15]}...] (deleted)")
+                    click.echo(f"  <- [{link.from_resource_id[:ID_DISPLAY_LENGTH]}] (deleted)")
 
         if not has_any:
             click.echo("No related resources found.")
@@ -376,9 +377,9 @@ def related(id: str, depth: int, relation: tuple, bidirectional: bool):
             for lesson_id in rule.linked_lessons:
                 lesson = core.get_lesson(lesson_id)
                 if lesson:
-                    click.echo(f"  -> [{lesson_id[:15]}...] {lesson.title}")
+                    click.echo(f"  -> [{lesson_id[:ID_DISPLAY_LENGTH]}] {lesson.title}")
                 else:
-                    click.echo(f"  -> [{lesson_id[:15]}...] (deleted)")
+                    click.echo(f"  -> [{lesson_id[:ID_DISPLAY_LENGTH]}] (deleted)")
             click.echo()
 
         if rule.linked_resources:
@@ -387,9 +388,9 @@ def related(id: str, depth: int, relation: tuple, bidirectional: bool):
             for resource_id in rule.linked_resources:
                 resource = core.get_resource(resource_id)
                 if resource:
-                    click.echo(f"  -> [{resource_id[:15]}...] {resource.title}")
+                    click.echo(f"  -> [{resource_id[:ID_DISPLAY_LENGTH]}] {resource.title}")
                 else:
-                    click.echo(f"  -> [{resource_id[:15]}...] (deleted)")
+                    click.echo(f"  -> [{resource_id[:ID_DISPLAY_LENGTH]}] (deleted)")
 
         if not has_any:
             click.echo("No related entities found.")
@@ -493,7 +494,7 @@ def list_cmd(
             chunk_count = chunk_counts.get(resource.id, 0)
             chunk_info = f", {chunk_count} chunk(s)" if chunk_count > 0 else ""
             versions_str = ", ".join(resource.versions) if resource.versions else "unversioned"
-            click.echo(f"{type_indicator} [{resource.id[:15]}...] {resource.title}")
+            click.echo(f"{type_indicator} [{resource.id[:ID_DISPLAY_LENGTH]}] {resource.title}")
             click.echo(f"  versions: {versions_str}{chunk_info}")
             if resource.tags:
                 click.echo(f"  tags: {', '.join(resource.tags)}")
@@ -541,7 +542,7 @@ def list_cmd(
                 line_info = f"lines {chunk.start_line + 1}-{chunk.end_line + 1}, "
             token_info = f"{chunk.token_count} tokens" if chunk.token_count else "? tokens"
             summary_marker = " [S]" if chunk.summary else ""
-            click.echo(f"  {chunk.chunk_index}. [{chunk.id[:15]}...] ({line_info}{token_info}){summary_marker}")
+            click.echo(f"  {chunk.chunk_index}. [{chunk.id[:ID_DISPLAY_LENGTH]}] ({line_info}{token_info}){summary_marker}")
             click.echo(f"     {title}")
 
         click.echo()
