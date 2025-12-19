@@ -122,17 +122,39 @@ class TestLessonToLessonEdges:
         core.link_lessons(grandparent, parent, "related_to", config=temp_config)
         core.link_lessons(parent, child, "related_to", config=temp_config)
 
-        # Depth 1: should only get parent
-        depth1 = core.get_related(grandparent, depth=1, config=temp_config)
+        # Depth 1 (directional): should only get parent
+        depth1 = core.get_related(grandparent, depth=1, bidirectional=False, config=temp_config)
         assert len(depth1) == 1
         assert depth1[0].id == parent
 
-        # Depth 2: should get both parent and child
-        depth2 = core.get_related(grandparent, depth=2, config=temp_config)
+        # Depth 2 (directional): should get both parent and child
+        depth2 = core.get_related(grandparent, depth=2, bidirectional=False, config=temp_config)
         assert len(depth2) == 2
         depth2_ids = {r.id for r in depth2}
         assert parent in depth2_ids
         assert child in depth2_ids
+
+    def test_get_related_bidirectional(self, temp_config):
+        """Test bidirectional traversal includes incoming edges."""
+        # Create A -> B -> C chain
+        a = core.add_lesson(title="A", content="First.", config=temp_config)
+        b = core.add_lesson(title="B", content="Second.", config=temp_config)
+        c = core.add_lesson(title="C", content="Third.", config=temp_config)
+
+        core.link_lessons(a, b, "related_to", config=temp_config)
+        core.link_lessons(b, c, "related_to", config=temp_config)
+
+        # From B, directional (outgoing only): should only find C
+        directional = core.get_related(b, depth=1, bidirectional=False, config=temp_config)
+        assert len(directional) == 1
+        assert directional[0].id == c
+
+        # From B, bidirectional: should find both A and C
+        bidirectional = core.get_related(b, depth=1, bidirectional=True, config=temp_config)
+        assert len(bidirectional) == 2
+        bidirectional_ids = {r.id for r in bidirectional}
+        assert a in bidirectional_ids
+        assert c in bidirectional_ids
 
     def test_different_relation_types(self, temp_config):
         """Test different relation types create separate edges."""

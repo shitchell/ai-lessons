@@ -78,12 +78,13 @@ class TestIdTypeChecks:
         assert is_chunk_id("") is False
 
     def test_is_resource_id_valid(self):
-        assert is_resource_id("ABC123") is True
-        assert is_resource_id("01KCPN9VWAZNSKYVHPCWVPXA2C") is True
+        assert is_resource_id("RES01KCPN9VWAZNSKYVHPCWVPXA2C") is True
+        assert is_resource_id("RESABC123") is True
 
     def test_is_resource_id_invalid(self):
-        assert is_resource_id("ABC123.0") is False
-        assert is_resource_id("ABC123.5") is False
+        assert is_resource_id("ABC123") is False  # Missing RES prefix
+        assert is_resource_id("RES01KCPN9VWAZNSKYVHPCWVPXA2C.0") is False  # Has chunk suffix
+        assert is_resource_id("RES01KCPN9VWAZNSKYVHPCWVPXA2C.5") is False  # Has chunk suffix
 
 
 class TestRoundTrip:

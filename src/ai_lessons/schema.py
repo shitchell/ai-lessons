@@ -152,13 +152,13 @@ CREATE TABLE IF NOT EXISTS rule_tags (
     PRIMARY KEY (rule_id, tag)
 );
 
--- v2: Rule links (to lessons and resources)
-CREATE TABLE IF NOT EXISTS rule_links (
-    rule_id TEXT NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
-    target_id TEXT NOT NULL,
-    target_type TEXT NOT NULL CHECK (target_type IN ('lesson', 'resource')),
-    PRIMARY KEY (rule_id, target_id)
-);
+-- v2: Rule links - DEPRECATED in v9, now uses edges table
+-- CREATE TABLE IF NOT EXISTS rule_links (
+--     rule_id TEXT NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+--     target_id TEXT NOT NULL,
+--     target_type TEXT NOT NULL CHECK (target_type IN ('lesson', 'resource')),
+--     PRIMARY KEY (rule_id, target_id)
+-- );
 
 -- v6: lesson_links table removed in v9, merged into edges
 
@@ -205,7 +205,8 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_resource ON resource_chunks(resou
 -- v2: Indexes for rules
 CREATE INDEX IF NOT EXISTS idx_rules_approved ON rules(approved);
 CREATE INDEX IF NOT EXISTS idx_rule_tags_tag ON rule_tags(tag);
-CREATE INDEX IF NOT EXISTS idx_rule_links_target ON rule_links(target_id, target_type);
+-- v9: DEPRECATED - rule links now use edges table
+-- CREATE INDEX IF NOT EXISTS idx_rule_links_target ON rule_links(target_id, target_type);
 """
 
 # Seed data for reference tables

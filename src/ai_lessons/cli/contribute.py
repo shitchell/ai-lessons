@@ -20,28 +20,49 @@ def contribute():
     pass
 
 
-@contribute.command("add-lesson")
-@click.option("--title", "-t", required=True, help="Lesson title")
-@click.option("--content", "-c", help="Lesson content (or use stdin)")
+@contribute.command("add")
+@click.option("--type", "-t", "entity_type", required=True, type=click.Choice(["lesson", "rule"]),
+              help="Entity type to add")
+# Shared options
+@click.option("--title", required=True, help="Title (required for both)")
+@click.option("--content", "-c", help="Content (or use stdin)")
 @click.option("--tags", help="Comma-separated tags")
-@click.option("--context", "contexts", multiple=True, help="Context where this applies")
-@click.option("--anti-context", "anti_contexts", multiple=True, help="Context where this does NOT apply")
-@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
-@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
-@click.option("--source-notes", help="Notes about the source")
-@click.option("--link-resource", "linked_resources", multiple=True, help="Resource ID to link (can specify multiple)")
+@click.option("--link-resource", "linked_resources", multiple=True, help="Resource ID to link")
+# Lesson-specific options
+@click.option("--context", "contexts", multiple=True, help="[lesson] Context where this applies")
+@click.option("--anti-context", "anti_contexts", multiple=True, help="[lesson] Context where this does NOT apply")
+@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]),
+              help="[lesson] Confidence level")
+@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]),
+              help="[lesson] Source type")
+@click.option("--source-notes", help="[lesson] Notes about the source")
+# Rule-specific options
+@click.option("--rationale", "-r", help="[rule] Why this rule exists (required for rules)")
+@click.option("--link-lesson", "linked_lessons", multiple=True, help="[rule] Lesson ID to link")
 def add(
+    entity_type: str,
     title: str,
     content: Optional[str],
     tags: Optional[str],
+    linked_resources: tuple,
     contexts: tuple,
     anti_contexts: tuple,
     confidence: Optional[str],
     source: Optional[str],
     source_notes: Optional[str],
-    linked_resources: tuple,
+    rationale: Optional[str],
+    linked_lessons: tuple,
 ):
-    """Add a new lesson."""
+    """Add a new lesson or suggest a rule.
+
+    \b
+    Examples:
+      # Add a lesson
+      ai-lessons contribute add --type lesson --title "API Rate Limits" -c "Content here" --tags api,limits
+
+      # Suggest a rule (requires approval)
+      ai-lessons contribute add --type rule --title "Use Pagination" --rationale "Prevents timeouts" -c "Always paginate large result sets"
+    """
     # Read content from stdin if not provided
     if content is None:
         if sys.stdin.isatty():
@@ -52,67 +73,58 @@ def add(
         click.echo("Error: Content is required", err=True)
         sys.exit(1)
 
-    # Verify linked resources exist before creating lesson
+    # Verify linked resources exist
     for resource_id in linked_resources:
         resource = core.get_resource(resource_id)
         if not resource:
             click.echo(f"Error: Resource not found: {resource_id}", err=True)
             sys.exit(1)
 
-    lesson_id = core.add_lesson(
-        title=title,
-        content=content,
-        tags=parse_tags(tags),
-        contexts=list(contexts) if contexts else None,
-        anti_contexts=list(anti_contexts) if anti_contexts else None,
-        confidence=confidence,
-        source=source,
-        source_notes=source_notes,
-    )
+    if entity_type == "lesson":
+        # Validate lesson-specific requirements
+        lesson_id = core.add_lesson(
+            title=title,
+            content=content,
+            tags=parse_tags(tags),
+            contexts=list(contexts) if contexts else None,
+            anti_contexts=list(anti_contexts) if anti_contexts else None,
+            confidence=confidence,
+            source=source,
+            source_notes=source_notes,
+        )
 
-    # Create links to resources
-    for resource_id in linked_resources:
-        core.link_lesson_to_resource(lesson_id, resource_id)
+        # Create links to resources
+        for resource_id in linked_resources:
+            core.link_lesson_to_resource(lesson_id, resource_id)
 
-    click.echo(f"Added lesson: {lesson_id}")
-    if linked_resources:
-        click.echo(f"  Linked to {len(linked_resources)} resource(s)")
+        click.echo(f"Added lesson: {lesson_id}")
+        if linked_resources:
+            click.echo(f"  Linked to {len(linked_resources)} resource(s)")
 
+    elif entity_type == "rule":
+        # Validate rule-specific requirements
+        if not rationale:
+            click.echo("Error: --rationale is required for rules", err=True)
+            sys.exit(1)
 
-@contribute.command("update-lesson")
-@click.argument("lesson_id")
-@click.option("--title", "-t", help="New title")
-@click.option("--content", "-c", help="New content")
-@click.option("--tags", help="New comma-separated tags (replaces existing)")
-@click.option("--confidence", type=click.Choice(["very-low", "low", "medium", "high", "very-high"]))
-@click.option("--source", type=click.Choice(["inferred", "tested", "documented", "observed", "hearsay"]))
-@click.option("--source-notes", help="New source notes")
-def update_lesson(
-    lesson_id: str,
-    title: Optional[str],
-    content: Optional[str],
-    tags: Optional[str],
-    confidence: Optional[str],
-    source: Optional[str],
-    source_notes: Optional[str],
-):
-    """Update an existing lesson."""
-    warn_deprecation("update-lesson", "update LSN...")
-    success = core.update_lesson(
-        lesson_id=lesson_id,
-        title=title,
-        content=content,
-        tags=parse_tags(tags),
-        confidence=confidence,
-        source=source,
-        source_notes=source_notes,
-    )
+        # Verify linked lessons exist
+        for lesson_id in linked_lessons:
+            lesson = core.get_lesson(lesson_id)
+            if not lesson:
+                click.echo(f"Error: Lesson not found: {lesson_id}", err=True)
+                sys.exit(1)
 
-    if success:
-        click.echo(f"Updated lesson: {lesson_id}")
-    else:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
+        rule_id = core.suggest_rule(
+            title=title,
+            content=content,
+            rationale=rationale,
+            tags=parse_tags(tags),
+            linked_lessons=list(linked_lessons) if linked_lessons else None,
+            linked_resources=list(linked_resources) if linked_resources else None,
+        )
+
+        click.echo(f"Suggested rule: {rule_id}")
+        click.echo("Note: Rule requires approval before it will appear in search results.")
 
 
 @contribute.command("update")
@@ -214,21 +226,6 @@ def update_cmd(
         sys.exit(1)
 
 
-@contribute.command("delete-lesson")
-@click.argument("lesson_id")
-@click.confirmation_option(prompt="Are you sure you want to delete this lesson?")
-def delete_lesson(lesson_id: str):
-    """Delete a lesson."""
-    warn_deprecation("delete-lesson", "delete LSN...")
-    success = core.delete_lesson(lesson_id)
-
-    if success:
-        click.echo(f"Deleted lesson: {lesson_id}")
-    else:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
-
-
 @contribute.command("delete")
 @click.argument("id")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
@@ -288,80 +285,6 @@ def delete_cmd(id: str, yes: bool):
         sys.exit(1)
 
 
-@contribute.command("link-lesson")
-@click.argument("from_id")
-@click.argument("to_id")
-@click.option("--relation", "-r", required=True, help="Relationship type (e.g., related_to, derived_from)")
-def link_lesson(from_id: str, to_id: str, relation: str):
-    """Create a link between two lessons."""
-    warn_deprecation("link-lesson", "link LSN... LSN...")
-    success = core.link_lessons(from_id, to_id, relation)
-
-    if success:
-        click.echo(f"Linked {from_id} --[{relation}]--> {to_id}")
-    else:
-        click.echo("Link already exists or lessons not found.", err=True)
-        sys.exit(1)
-
-
-@contribute.command("unlink-lesson")
-@click.argument("from_id")
-@click.argument("to_id")
-@click.option("--relation", "-r", help="Specific relation to remove (all if not specified)")
-def unlink_lesson(from_id: str, to_id: str, relation: Optional[str]):
-    """Remove link(s) between two lessons."""
-    warn_deprecation("unlink-lesson", "unlink LSN... LSN...")
-    count = core.unlink_lessons(from_id, to_id, relation)
-    click.echo(f"Removed {count} link(s)")
-
-
-@contribute.command("link-resource")
-@click.argument("lesson_id")
-@click.argument("resource_id")
-@click.option("--relation", "-r", default="related_to", help="Relationship type (default: related_to)")
-def link_resource(lesson_id: str, resource_id: str, relation: str):
-    """Link a lesson to a resource.
-
-    Creates a connection between a lesson and a resource document/script.
-    This allows related documentation to be surfaced alongside lessons.
-    """
-    warn_deprecation("link-resource", "link LSN... RES...")
-    # Verify lesson exists
-    lesson = core.get_lesson(lesson_id)
-    if not lesson:
-        click.echo(f"Lesson not found: {lesson_id}", err=True)
-        sys.exit(1)
-
-    # Verify resource exists
-    resource = core.get_resource(resource_id)
-    if not resource:
-        click.echo(f"Resource not found: {resource_id}", err=True)
-        sys.exit(1)
-
-    success = core.link_lesson_to_resource(lesson_id, resource_id, relation)
-
-    if success:
-        click.echo(f"Linked lesson \"{lesson.title}\" --[{relation}]--> resource \"{resource.title}\"")
-    else:
-        click.echo("Link already exists.", err=True)
-        sys.exit(1)
-
-
-@contribute.command("unlink-resource")
-@click.argument("lesson_id")
-@click.argument("resource_id")
-def unlink_resource(lesson_id: str, resource_id: str):
-    """Remove a link between a lesson and a resource."""
-    warn_deprecation("unlink-resource", "unlink LSN... RES...")
-    success = core.unlink_lesson_from_resource(lesson_id, resource_id)
-
-    if success:
-        click.echo(f"Unlinked lesson {lesson_id} from resource {resource_id}")
-    else:
-        click.echo("Link not found.", err=True)
-        sys.exit(1)
-
-
 @contribute.command("link")
 @click.argument("from_id")
 @click.argument("to_id")
@@ -415,7 +338,7 @@ def unlink_cmd(from_id: str, to_id: str, relation: Optional[str]):
 # --- Resource commands ---
 
 
-@contribute.command("add-resource")
+@contribute.command("import")
 @click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--type", "-t", "resource_type", required=True, type=click.Choice(["doc", "script"]),
               help="Resource type")
@@ -447,7 +370,7 @@ def add_resource(
     preview: bool,
     generate_summaries: bool,
 ):
-    """Add doc or script resource(s).
+    """Import doc or script resource(s).
 
     Titles are auto-generated from the file path relative to the root directory.
     The root directory is determined by: --root flag > git repo root > common ancestor.
@@ -455,19 +378,19 @@ def add_resource(
     \b
     Examples:
       # Import a single doc (title: jira-cloud-rest-api/v3/Apis/IssueVotesApi.md)
-      ai-lessons contribute add-resource -t doc v3/Apis/IssueVotesApi.md --version v3
+      ai-lessons contribute import -t doc v3/Apis/IssueVotesApi.md --version v3
 
     \b
       # Import multiple docs with glob
-      ai-lessons contribute add-resource -t doc v3/Apis/*.md --version v3 --tags api,jira
+      ai-lessons contribute import -t doc v3/Apis/*.md --version v3 --tags api,jira
 
     \b
       # Import with explicit root
-      ai-lessons contribute add-resource -t doc --root /path/to/project src/**/*.py
+      ai-lessons contribute import -t doc --root /path/to/project src/**/*.py
 
     \b
       # Preview chunking before import
-      ai-lessons contribute add-resource -t doc myfile.md --preview
+      ai-lessons contribute import -t doc myfile.md --preview
 
     For documents, content is automatically chunked for better search.
     """
@@ -594,77 +517,6 @@ def refresh_cmd(id: str):
     else:
         click.echo(f"Resource not found or has no path: {id}", err=True)
         sys.exit(1)
-
-
-@contribute.command("refresh-resource")
-@click.argument("resource_id")
-def refresh_resource(resource_id: str):
-    """Refresh a resource's content from its source path."""
-    warn_deprecation("refresh-resource", "refresh RES...")
-    success = core.refresh_resource(resource_id)
-
-    if success:
-        click.echo(f"Refreshed resource: {resource_id}")
-    else:
-        click.echo(f"Resource not found or has no path: {resource_id}", err=True)
-        sys.exit(1)
-
-
-@contribute.command("delete-resource")
-@click.argument("resource_id")
-@click.confirmation_option(prompt="Are you sure you want to delete this resource?")
-def delete_resource(resource_id: str):
-    """Delete a resource."""
-    warn_deprecation("delete-resource", "delete RES...")
-    success = core.delete_resource(resource_id)
-
-    if success:
-        click.echo(f"Deleted resource: {resource_id}")
-    else:
-        click.echo(f"Resource not found: {resource_id}", err=True)
-        sys.exit(1)
-
-
-# --- Rule commands ---
-
-
-@contribute.command("suggest-rule")
-@click.option("--title", "-t", required=True, help="Rule title")
-@click.option("--content", "-c", help="Rule content (or use stdin)")
-@click.option("--rationale", "-r", required=True, help="Why this rule exists")
-@click.option("--tags", help="Comma-separated tags")
-@click.option("--link-lesson", "linked_lessons", multiple=True, help="Lesson ID to link")
-@click.option("--link-resource", "linked_resources", multiple=True, help="Resource ID to link")
-def suggest_rule(
-    title: str,
-    content: Optional[str],
-    rationale: str,
-    tags: Optional[str],
-    linked_lessons: tuple,
-    linked_resources: tuple,
-):
-    """Suggest a rule for human approval."""
-    # Read content from stdin if not provided
-    if content is None:
-        if sys.stdin.isatty():
-            click.echo("Enter rule content (Ctrl+D to finish):")
-        content = sys.stdin.read().strip()
-
-    if not content:
-        click.echo("Error: Content is required", err=True)
-        sys.exit(1)
-
-    rule_id = core.suggest_rule(
-        title=title,
-        content=content,
-        rationale=rationale,
-        tags=parse_tags(tags),
-        linked_lessons=list(linked_lessons) if linked_lessons else None,
-        linked_resources=list(linked_resources) if linked_resources else None,
-    )
-
-    click.echo(f"Suggested rule: {rule_id}")
-    click.echo("Note: Rule requires approval before it will appear in search results.")
 
 
 @contribute.command()

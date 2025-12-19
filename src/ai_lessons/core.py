@@ -1105,6 +1105,7 @@ def get_related(
     lesson_id: str,
     depth: int = 1,
     relations: Optional[list[str]] = None,
+    bidirectional: bool = True,
     config: Optional[Config] = None,
 ) -> list[Lesson]:
     """Get lessons related to the given lesson via graph edges.
@@ -1113,6 +1114,7 @@ def get_related(
         lesson_id: The starting lesson ID.
         depth: Maximum traversal depth (default 1).
         relations: Optional filter for relation types.
+        bidirectional: If True, include edges in both directions (default True).
         config: Configuration to use.
 
     Returns:
@@ -1126,31 +1128,69 @@ def get_related(
     with get_db(config) as conn:
         # Build recursive CTE query (only traverse lesson→lesson edges)
         relation_filter = ""
-        params: list = [lesson_id, depth]
+        base_params: list = []
 
         if relations:
             placeholders = ",".join("?" * len(relations))
             relation_filter = f"AND e.relation IN ({placeholders})"
-            params = [lesson_id] + relations + [depth]
+            base_params = list(relations)
 
-        query = f"""
-            WITH RECURSIVE related AS (
-                SELECT to_id, 1 as depth
-                FROM edges e
-                WHERE from_id = ? AND from_type = 'lesson' AND to_type = 'lesson' {relation_filter}
+        if bidirectional:
+            # Query both outgoing and incoming edges
+            query = f"""
+                WITH RECURSIVE related AS (
+                    -- Outgoing edges (from_id = lesson_id)
+                    SELECT to_id AS related_id, 1 as depth
+                    FROM edges e
+                    WHERE from_id = ? AND from_type = 'lesson' AND to_type = 'lesson' {relation_filter}
 
-                UNION
+                    UNION
 
-                SELECT e.to_id, r.depth + 1
-                FROM edges e
-                JOIN related r ON e.from_id = r.to_id
-                WHERE r.depth < ? AND e.from_type = 'lesson' AND e.to_type = 'lesson' {relation_filter}
-            )
-            SELECT DISTINCT to_id FROM related
-        """
+                    -- Incoming edges (to_id = lesson_id)
+                    SELECT from_id AS related_id, 1 as depth
+                    FROM edges e
+                    WHERE to_id = ? AND from_type = 'lesson' AND to_type = 'lesson' {relation_filter}
+
+                    UNION
+
+                    -- Recursive outgoing
+                    SELECT e.to_id, r.depth + 1
+                    FROM edges e
+                    JOIN related r ON e.from_id = r.related_id
+                    WHERE r.depth < ? AND e.from_type = 'lesson' AND e.to_type = 'lesson' {relation_filter}
+
+                    UNION
+
+                    -- Recursive incoming
+                    SELECT e.from_id, r.depth + 1
+                    FROM edges e
+                    JOIN related r ON e.to_id = r.related_id
+                    WHERE r.depth < ? AND e.from_type = 'lesson' AND e.to_type = 'lesson' {relation_filter}
+                )
+                SELECT DISTINCT related_id FROM related
+            """
+            params = [lesson_id] + base_params + [lesson_id] + base_params + [depth] + base_params + [depth] + base_params
+        else:
+            # Only outgoing edges (original behavior)
+            query = f"""
+                WITH RECURSIVE related AS (
+                    SELECT to_id AS related_id, 1 as depth
+                    FROM edges e
+                    WHERE from_id = ? AND from_type = 'lesson' AND to_type = 'lesson' {relation_filter}
+
+                    UNION
+
+                    SELECT e.to_id, r.depth + 1
+                    FROM edges e
+                    JOIN related r ON e.from_id = r.related_id
+                    WHERE r.depth < ? AND e.from_type = 'lesson' AND e.to_type = 'lesson' {relation_filter}
+                )
+                SELECT DISTINCT related_id FROM related
+            """
+            params = [lesson_id] + base_params + [depth] + base_params
 
         cursor = conn.execute(query, params)
-        related_ids = [row["to_id"] for row in cursor.fetchall()]
+        related_ids = [row["related_id"] for row in cursor.fetchall()]
 
     # Fetch full lessons
     return [get_lesson(rid, config) for rid in related_ids if get_lesson(rid, config)]
@@ -2718,17 +2758,17 @@ def suggest_rule(
         # Insert tags
         _save_tags(conn, rule_id, 'rule', tags)
 
-        # Insert links to lessons
+        # Insert links to lessons (via edges table)
         if linked_lessons:
             conn.executemany(
-                "INSERT INTO rule_links (rule_id, target_id, target_type) VALUES (?, ?, 'lesson')",
+                "INSERT INTO edges (from_id, from_type, to_id, to_type, relation) VALUES (?, 'rule', ?, 'lesson', 'related_to')",
                 [(rule_id, lid) for lid in linked_lessons],
             )
 
-        # Insert links to resources
+        # Insert links to resources (via edges table)
         if linked_resources:
             conn.executemany(
-                "INSERT INTO rule_links (rule_id, target_id, target_type) VALUES (?, ?, 'resource')",
+                "INSERT INTO edges (from_id, from_type, to_id, to_type, relation) VALUES (?, 'rule', ?, 'resource', 'related_to')",
                 [(rule_id, rid) for rid in linked_resources],
             )
 
@@ -2835,19 +2875,19 @@ def get_rule(rule_id: str, config: Optional[Config] = None) -> Optional[Rule]:
         )
         tags = [r["tag"] for r in cursor.fetchall()]
 
-        # Get linked lessons
+        # Get linked lessons (from edges table)
         cursor = conn.execute(
-            "SELECT target_id FROM rule_links WHERE rule_id = ? AND target_type = 'lesson'",
+            "SELECT to_id FROM edges WHERE from_id = ? AND from_type = 'rule' AND to_type = 'lesson'",
             (rule_id,),
         )
-        linked_lessons = [r["target_id"] for r in cursor.fetchall()]
+        linked_lessons = [r["to_id"] for r in cursor.fetchall()]
 
-        # Get linked resources
+        # Get linked resources (from edges table)
         cursor = conn.execute(
-            "SELECT target_id FROM rule_links WHERE rule_id = ? AND target_type = 'resource'",
+            "SELECT to_id FROM edges WHERE from_id = ? AND from_type = 'rule' AND to_type = 'resource'",
             (rule_id,),
         )
-        linked_resources = [r["target_id"] for r in cursor.fetchall()]
+        linked_resources = [r["to_id"] for r in cursor.fetchall()]
 
         return Rule(
             id=row["id"],
@@ -2974,7 +3014,7 @@ def link_to_rule(
     with get_db(config) as conn:
         try:
             conn.execute(
-                "INSERT INTO rule_links (rule_id, target_id, target_type) VALUES (?, ?, ?)",
+                "INSERT INTO edges (from_id, from_type, to_id, to_type, relation) VALUES (?, 'rule', ?, ?, 'related_to')",
                 (rule_id, target_id, target_type),
             )
             conn.commit()
@@ -3009,12 +3049,12 @@ def unlink_from_rule(
     with get_db(config) as conn:
         if target_type:
             cursor = conn.execute(
-                "DELETE FROM rule_links WHERE rule_id = ? AND target_id = ? AND target_type = ?",
+                "DELETE FROM edges WHERE from_id = ? AND from_type = 'rule' AND to_id = ? AND to_type = ?",
                 (rule_id, target_id, target_type),
             )
         else:
             cursor = conn.execute(
-                "DELETE FROM rule_links WHERE rule_id = ? AND target_id = ?",
+                "DELETE FROM edges WHERE from_id = ? AND from_type = 'rule' AND to_id = ?",
                 (rule_id, target_id),
             )
         conn.commit()

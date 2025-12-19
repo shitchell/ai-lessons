@@ -179,7 +179,7 @@ def approve_rule(rule_id: str, approved_by: Optional[str]):
 # NOTE: reject-rule has been removed in favor of `contribute delete RUL...`
 
 
-@admin.command("reindex-resources")
+@admin.command("reindex")
 def reindex_resources():
     """Reindex all resources (re-generate embeddings)."""
     config = get_config()
@@ -390,7 +390,7 @@ def update_paths(from_path: str, to_path: str, dry_run: bool):
         click.echo(f"  Newly resolved links: {counts['newly_resolved']}")
 
 
-@admin.command("clear-resources")
+@admin.command("clear")
 @click.option("--pattern", "-p", help="Filter by title (case-insensitive substring)")
 @click.option("--type", "-t", "resource_type", type=click.Choice(["doc", "script"]),
               help="Filter by resource type")
@@ -415,15 +415,15 @@ def clear_resources(
     \b
     Examples:
       # Clear all resources (requires --all)
-      ai-lessons admin clear-resources --all
+      ai-lessons admin clear --all
 
     \b
       # Clear only v2 docs
-      ai-lessons admin clear-resources --version v2 --type doc
+      ai-lessons admin clear --version v2 --type doc
 
     \b
       # Preview what would be deleted
-      ai-lessons admin clear-resources --tags test --dry-run
+      ai-lessons admin clear --tags test --dry-run
     """
     # Safety check: require filters or --all
     has_filters = any([pattern, resource_type, version, tags])
